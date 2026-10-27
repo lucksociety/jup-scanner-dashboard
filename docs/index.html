@@ -189,7 +189,7 @@ async function scan(){const c=repoCfg();
   if(!run)throw new Error('The scan was accepted but did not start within 2 minutes. Try again.');
   while(run.status!=='completed'){await sleep(4000);
    run=await(await gh(`${base}/runs/${run.id}?t=${Date.now()}`)).json();let step='Starting';
-   try{const jb=await(await gh(`${base}/runs/${run.id}/jobs?t=${Date.now()}`)).json();const s=(jb.jobs?.[0]?.steps||[]).find(s=>s.status==='in_progress');if(s)step=STEP[s.name]||s.name}catch(e){}
+   try{const jb=await(await gh(`${base}/runs/${run.id}/jobs?t=${Date.now()}`)).json();const ss=jb.jobs?.[0]?.steps||[],s=ss.find(s=>s.status==='in_progress');if(s)step=STEP[s.name]||s.name;else if(ss.some(s=>s.status==='completed'))step='Finishing up'}catch(e){}
    prog(`<span class="spin"></span><span>Scanning ${mode==='live'?'live games':'upcoming games'}: <b>${esc(step)}</b></span><span class="t">${el()}</span><a href="${run.html_url}" target="_blank" rel="noopener">details</a>`)}
   if(run.conclusion!=='success')throw new Error(`The scan ${run.conclusion==='cancelled'?'was cancelled':'failed'}. <a href="${run.html_url}" target="_blank" rel="noopener">See details</a>`);
   prog(`<span class="spin"></span>Scan finished, loading results… <span class="t">${el()}</span>`);
