@@ -4,7 +4,9 @@ import { readFileSync } from "node:fs";
 
 import http from "node:http";
 import worker, { _resetGuard } from "../src/index.js";
-import { buildMessage, sealToken, openToken, topPicks } from "../src/embed.js";
+import { buildMessage, sealToken, openToken, topPicks, refreshForCard } from "../src/embed.js";
+import { handleLive } from "../src/index.js";
+import { applyLiveRow, liveRow, devig, feeOf } from "../../docs/live-core.js";
 
 const hex = u8 => Buffer.from(u8).toString("hex");
 const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
@@ -127,5 +129,76 @@ console.log("✓ workflow step: decrypts token, PATCHes @original with embed; mi
   const m = JSON.stringify(buildMessage(d));
   assert.ok(m.includes("Buy price **$0.65**") && !m.includes("0.52"), "embed shows the order-book ask, not the meter");
   console.log("✓ picks/embeds use only the order-book ask (meter, quote and no-seller rows excluded)");
+}
+{ // GET /live: caps, CORS, rate limit, de-vig, flags, line age; refreshForCard + topPicks exclude paused rows
+  const T = Date.now(), lm = new Date(T - 120000).toUTCString(), old = new Date(T - 900000).toUTCString();
+  const mk = (id, key, prices, extra = {}) => ({ matchupId: id, period: 0, key, status: "open", version: 10, prices, ...extra });
+  const mus = [1, 2, 3, 4].map(id => ({ id, status: "started", liveMode: null, periods: [{ period: 0, status: "open" }],
+    participants: [{ alignment: "home", state: { score: id === 3 ? 1 : 0 } }, { alignment: "away", state: { score: 0 } }] }));
+  mus[1].periods[0].status = "offline";   // matchup 2 suspended
+  const per = { 1: [mk(1, "s;0;m", [{ designation: "home", price: -150 }, { designation: "away", price: 130 }], { version: 12 })],
+    4: [mk(4, "s;0;m", [{ designation: "home", price: 100 }, { designation: "away", price: -120 }])] };
+  const sportMk = [mk(1, "s;0;m", [{ designation: "home", price: 200 }, { designation: "away", price: -250 }], { version: 11 }),   // older copy than per-matchup
+    mk(3, "s;0;ou;2.5", [{ designation: "over", points: 2.5, price: -110 }, { designation: "under", points: 2.5, price: -110 }])];
+  const seen = [];
+  const f0 = globalThis.fetch;
+  globalThis.fetch = async (u) => { u = String(u); seen.push(u); const H = h => ({ status: 200, headers: { "content-type": "application/json", ...h } });
+    if (u.includes("/matchups/live")) return new Response(JSON.stringify(mus), H({ "last-modified": lm }));
+    if (u.includes("/markets/live/straight")) return new Response(JSON.stringify(sportMk), H({ "last-modified": lm }));
+    let m = u.match(/matchups\/(\d+)\/markets\/straight/); if (m) return per[m[1]] ? new Response(JSON.stringify(per[m[1]]), H({ "last-modified": m[1] === "4" ? old : lm })) : new Response("no", { status: 403 });
+    if (u.includes("/events/scores")) return new Response(JSON.stringify({ data: [{ eventId: "E1", score: "0-0", live: true }, { eventId: "E3", score: "0-0", live: true }, { eventId: "E4", score: "0-0" }] }), H({}));
+    return new Response("x", { status: 500 }); };
+  const req = (q, o = {}) => new Request("https://w.example/live?" + q, { headers: { origin: "https://lucksociety.github.io", "cf-connecting-ip": "1.2.3.4", ...o } });
+  let r = await handleLive(req("ids=1,2,3,4,abc&sports=19,999&events=E1,E3,E4,bad%20id"), {});
+  assert.equal(r.status, 200); assert.equal(r.headers.get("access-control-allow-origin"), "https://lucksociety.github.io");
+  assert.match(r.headers.get("cache-control"), /max-age=3/);
+  const L = await r.json();
+  assert.ok(!seen.some(u => u.includes("/sports/999/")), "unknown sport dropped");
+  const [ph, pa] = devig([-150, 130]).probs;
+  assert.equal(L.pin["1"].fair["s;0;m|home"], +ph.toFixed(4), "newer per-matchup copy (version 12) wins over the per-sport copy");
+  assert.ok(Math.abs(L.pin["1"].as_of["s;0;m"] - (T - 120000)) < 2000, "line age from Last-Modified"); assert.ok(Math.abs(L.pin["1"].line_age_s - 120) <= 2);
+  assert.equal(L.pin["2"].suspended, true);
+  assert.ok(!JSON.stringify(L).includes("CmX2"), "no keys in the response");
+  // rows -> flags + recomputed edge with the live Buy price
+  const row = (o) => ({ event: "G" + o.pin_id, selection: "x", market_type: "moneyline", side: "YES", price: 0.55, price_src: "jupiter live", depth_ok: 50, fair_prob: 0.9, edge_pts: 0.3, link: "https://jup.ag", pin_d: "home", pin_key: "s;0;m", ...o });
+  const rows = [row({ pin_id: 1, event_id: "E1", score: "0-0" }), row({ pin_id: 2, event_id: "E2" }), row({ pin_id: 3, event_id: "E3", score: "0-0", pin_key: "s;0;ou;2.5", pin_d: "under" }),
+    row({ pin_id: 4, event_id: "E4", score: "0-0" }), row({ pin_id: 1, event_id: "E1", side: "NO", event: "G1b" }), row({ event: "nopin", pin_id: undefined, event_id: "E9" })];
+  rows.forEach(x => applyLiveRow(x, L));
+  assert.equal(rows[0].fair_prob, +ph.toFixed(4)); assert.equal(rows[0].live_flag, null);
+  assert.equal(rows[0].edge_pts, +(rows[0].fair_prob - (0.55 + feeOf(0.55))).toFixed(4), "edge = fair - (Buy price + fee)");
+  assert.equal(rows[4].fair_prob, +(1 - +ph.toFixed(4)).toFixed(4), "NO side = 1 - fair");
+  assert.equal(rows[1].live_flag, "suspended");
+  assert.equal(rows[2].live_flag, "score mismatch", "Jupiter 0-0 vs Pinnacle 1-0");
+  assert.equal(rows[3].live_flag, "line old", "15-min-old line");
+  assert.equal(rows[5].live_flag, null, "rows without a Pinnacle match are not flagged"); assert.equal(rows[5].fair_prob, 0.9, "...and keep the scan's win chance");
+  // score changed after the line was produced -> paused
+  const x = row({ pin_id: 1, event_id: "E1", score: "1-0", score_at: Math.floor(T / 1000) - 30 });
+  applyLiveRow(x, L); assert.equal(x.live_flag, "line behind score");
+  const y = row({ pin_id: 1, event_id: "E1", score: "1-0", score_at: Math.floor(T / 1000) - 600 });   // could have changed before the line: not flagged
+  applyLiveRow(y, L); assert.equal(y.live_flag, null);
+  const tp = topPicks({ rows: rows.map(r => ({ ...r, edge_pts: 0.02 })) }, 9);
+  assert.ok(tp.length && tp.every(r => !r.live_flag) && tp.some(r => r.event === "G1"), "paused rows never picks");
+  // second identical request is served from the 3 s memo
+  const n = seen.length; r = await handleLive(req("events=E4,E3,E1&ids=4,3,2,1&sports=19"), {}); assert.equal(r.headers.get("x-cache"), "HIT"); assert.equal(seen.length, n);
+  // caps
+  const many = Array.from({ length: 80 }, (_, i) => 1000 + i).join(",");
+  seen.length = 0; await handleLive(req(`ids=${many}&sports=19`), {}); assert.ok(seen.filter(u => /matchups\/\d+\/markets/.test(u)).length >= 30, "all 30 (capped) matchups fetched");
+  assert.ok(seen.length <= 50, "within the free-plan 50 subrequests: " + seen.length);
+  // bad input, other origin, rate limit, preflight
+  r = await handleLive(req("ids=;drop"), {}); assert.equal(r.status, 400);
+  r = await handleLive(req("ids=1&sports=19", { origin: "https://evil.example" }), {}); assert.equal(r.headers.get("access-control-allow-origin"), "https://lucksociety.github.io");
+  r = await handleLive(req("ids=1&sports=19"), { LIVE_LIMITER: { limit: async ({ key }) => ({ success: key !== "1.2.3.4" }) } }); assert.equal(r.status, 429);
+  r = await worker.fetch(new Request("https://w.example/live", { method: "OPTIONS", headers: { origin: "http://127.0.0.1:8765" } }), env); assert.equal(r.status, 204);
+  assert.equal(r.headers.get("access-control-allow-origin"), "http://127.0.0.1:8765");
+  r = await worker.fetch(new Request("https://w.example/"), env); assert.match(await r.text(), /running/, "plain GET unchanged");
+  // Discord card refresh: re-prices fair + flags right before posting; paused rows never become picks
+  const data = { mode: "live", status: "ok", scanned_at_unix: Math.floor(T / 1000) - 20, counts: { live_events: 4 }, rows: [
+    row({ pin_id: 1, event_id: "E1", score: "0-0", edge_pts: 0.02, market_id: "M1" }), row({ pin_id: 2, event_id: "E2", edge_pts: 0.05, market_id: "M2", event: "G2" }) ] };
+  const note = await refreshForCard(data, { prices: false });
+  assert.match(note, /refreshed live/); assert.equal(data.rows[0].fair_prob, +ph.toFixed(4)); assert.equal(data.rows[1].live_flag, "suspended");
+  assert.ok(!topPicks(data, 5).some(r => r.event === "G2"), "suspended row is not a pick");
+  assert.match(JSON.stringify(buildMessage(data, { note })), /refreshed live/);
+  globalThis.fetch = f0;
+  console.log("✓ GET /live: caps, CORS, 3 s memo, 429 rate limit, de-vig + newest copy, line age, flags; Discord card refresh + paused rows excluded");
 }
 console.log("\nALL TESTS PASSED");

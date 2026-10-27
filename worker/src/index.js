@@ -2,6 +2,7 @@
 // Flow: verify Ed25519 signature -> PING/PONG -> /livebets: deferred reply (type 5) -> GitHub workflow_dispatch
 // (scan.yml) with the interaction token -> the workflow edits the reply with the top bets when the scan is done.
 import { buildMessage, sealToken } from "./embed.js";
+import { fetchLive, parseQuery, asOfFrom } from "../../docs/live-core.js";
 
 const DISCORD = "https://discord.com/api/v10";
 const GH = "https://api.github.com";
@@ -92,8 +93,55 @@ async function handleLivebets(env, it, ctx) {
   return json({ type: 5 });   // "Luck Society is thinking…" until the workflow edits it (~30-60s)
 }
 
+// ---- GET /live: read-only live fair odds + scores for the dashboard (no secrets involved, Discord flow untouched)
+const ALLOWED_ORIGINS = ["https://lucksociety.github.io", "http://127.0.0.1:8765", "http://localhost:8765"];
+const LIVE_TTL_MS = 3000;
+const upstream = new Map();   // per-isolate micro-cache of upstream JSON (url -> {t, p}) so many viewers share one fetch
+const answers = new Map();    // per-isolate cache of whole answers (normalized query -> {t, body})
+async function cachedJSON(url, headers) {
+  const hit = upstream.get(url), now = Date.now();
+  if (hit && now - hit.t < LIVE_TTL_MS) return hit.p;
+  const p = fetch(url, { headers: { "User-Agent": "Mozilla/5.0 (luck-society-live)", ...headers } }).then(async r => {
+    if (!r.ok) throw new Error(`${new URL(url).host} ${r.status}`); return { __live: 1, body: await r.json(), asOf: asOfFrom(r.headers) }; });
+  upstream.set(url, { t: now, p }); p.catch(() => upstream.delete(url));
+  if (upstream.size > 200) for (const [k, v] of upstream) if (now - v.t > LIVE_TTL_MS) upstream.delete(k);
+  return p;
+}
+function cors(req) {
+  const o = req.headers.get("origin");
+  return { "Access-Control-Allow-Origin": ALLOWED_ORIGINS.includes(o) ? o : ALLOWED_ORIGINS[0], "Vary": "Origin",
+    "Access-Control-Allow-Methods": "GET, OPTIONS", "Access-Control-Max-Age": "86400" };
+}
+export async function handleLive(req, env) {
+  const h = { ...cors(req), "content-type": "application/json", "Cache-Control": "public, max-age=3" };
+  if (env.LIVE_LIMITER) {   // per-IP rate limit (Workers Rate Limiting binding, see wrangler.toml)
+    const ip = req.headers.get("cf-connecting-ip") || "unknown";
+    const { success } = await env.LIVE_LIMITER.limit({ key: ip });
+    if (!success) return new Response(JSON.stringify({ error: "rate limited, slow down" }), { status: 429, headers: { ...h, "Retry-After": "10" } });
+  }
+  const q = parseQuery(new URL(req.url).searchParams);
+  if (!q.ids.length && !q.events.length) return new Response(JSON.stringify({ error: "pass ids=<pinnacle matchup ids>&sports=<pinnacle sport ids>&events=<jupiter event ids> (max 30 each)" }), { status: 400, headers: h });
+  const key = JSON.stringify([q.ids.slice().sort(), q.sports.slice().sort(), q.events.slice().sort()]), now = Date.now();
+  const hit = answers.get(key);
+  if (hit && now - hit.t < LIVE_TTL_MS) return new Response(hit.body, { headers: { ...h, "X-Cache": "HIT" } });
+  const out = await fetchLive(q, cachedJSON);
+  const body = JSON.stringify({ ...out, served_at: Date.now(), ttl_ms: LIVE_TTL_MS });
+  answers.set(key, { t: now, body });
+  if (answers.size > 100) for (const [k, v] of answers) if (now - v.t > LIVE_TTL_MS) answers.delete(k);
+  return new Response(body, { headers: { ...h, "X-Cache": "MISS" } });
+}
+
 export default {
   async fetch(req, env, ctx) {
+    const path = new URL(req.url).pathname;
+    if (path === "/live") {
+      if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors(req) });
+      if (req.method === "GET") {
+        try { return await handleLive(req, env); }
+        catch (e) { return new Response(JSON.stringify({ error: "live feed failed: " + e.message }), { status: 502, headers: { ...cors(req), "content-type": "application/json" } }); }
+      }
+      return new Response("method not allowed", { status: 405 });
+    }
     if (req.method === "GET") return new Response("Luck Society /livebets endpoint is running. 🍀", { status: 200 });
     if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
     const body = await req.text();

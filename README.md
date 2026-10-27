@@ -147,7 +147,28 @@ To restrict who can use it: Server Settings → Integrations → Luck Society Li
 - **Live prices on the dashboard:** the page subscribes to the same order-book websocket for the shown bets (no token needed),
   recomputes ask, edge and "$ available" on every update, and shows "live · ▲/▼ X¢ since scan" or "no sellers". Every 15 s it also
   checks market status (closed markets are marked) and uses REST `/orderbook` for any market the socket hasn't updated. In live mode,
-  win chances older than 5 minutes are marked "old win chance" and are left out of Top picks. Scan again for fresh edges.
+  Top picks only use win chances that are being kept fresh (see next point).
+- **Live win chances (every ~5 s):** the dashboard polls the Worker's read-only `GET /live?ids=<Pinnacle matchup ids>&sports=<Pinnacle
+  sport ids>&events=<Jupiter event ids>` (max 30 each) for the bets on screen. The Worker re-reads Pinnacle's live line for the exact
+  market each row was matched to (`pin_id` / `pin_key` / `pin_d`, de-vigged with the same math as the scanner) and Jupiter's scoreboard
+  (`/events/scores`, the same data jup.ag's scoreboard shows; jup.ag itself refetches it every 10 s). The page then updates score and
+  clock, recomputes win chance and edge with the live Buy price, re-ranks Top picks, and shows "Win chance updated Xs ago".
+  One shared module, `docs/live-core.js`, does this for the Worker, the dashboard and the Discord card.
+- **Paused bets (⏸, greyed, never a Top pick):** the sharp line is suspended or pulled, Pinnacle's score disagrees with Jupiter's,
+  the game is over, **the score changed after the sharp line was produced**, or the sharp line is **over 5 minutes old**.
+- **Why lines can be old:** Pinnacle's public feed is served from Pinnacle's CDN with `max-age≈900 s`, so a "live" line can be up to
+  ~15 minutes old no matter how often anyone polls. The scanner and the Worker read both cached copies (per-matchup and per-sport),
+  keep the newer one (market `version`), and record its age (`line_as_of`, from `Last-Modified`). The "Sharp line" column shows
+  "line X min old". This is the real limit on win-chance freshness; the pause rules above stop stale lines from becoming picks.
+- If `/live` fails (3 polls in a row), the page falls back to the old rule: win chances older than 5 minutes are marked
+  "old win chance" and left out of Top picks.
+- `/live` limits: CORS for `lucksociety.github.io` (and localhost:8765 for testing), a 3 s cache per Worker instance, max 30 ids,
+  and a per-IP rate limit (25 requests / 10 s, Workers Rate Limiting binding `LIVE_LIMITER` in `wrangler.toml`). It holds no secrets.
+  Free plan: 100,000 Worker requests/day. One open dashboard tab uses ~17,000/day (1 every 5 s, paused while the tab is hidden), so
+  about 5 tabs open all day fit. Each `/live` call makes ≤ 30 + 2×sports + 2 upstream requests (free plan cap: 50).
+- **Discord:** right before posting, `/livebets` (the GitHub Action step) runs the same refresh for its candidate bets: fresh win
+  chance, score and Buy price (REST order book), the same pause rules, then re-ranks. The card says "⚡ … refreshed live just before
+  posting". A card re-used inside the 60 s cooldown is not refreshed again.
 - **Updated** column = how long ago the price was read.
 
 ## Math

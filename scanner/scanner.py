@@ -36,13 +36,26 @@ PIN_SPORTS = {3: "baseball", 4: "basketball", 6: "boxing", 8: "cricket", 12: "es
               18: "handball", 19: "hockey", 22: "mma", 27: "rugby", 29: "soccer", 33: "tennis", 34: "volleyball"}
 
 def http_json(url, headers=None, timeout=60, retries=3):
+    return http_json_meta(url, headers, timeout, retries)[0]
+
+def as_of(hdrs):
+    """when a (possibly CDN-cached) response was produced, unix s: Last-Modified, else Date - Age"""
+    from email.utils import parsedate_to_datetime
+    for k in ("Last-Modified", "Date"):
+        try:
+            t = parsedate_to_datetime(hdrs.get(k)).timestamp()
+            return t if k == "Last-Modified" else t - float(hdrs.get("Age") or 0)
+        except Exception: pass
+    return None
+
+def http_json_meta(url, headers=None, timeout=60, retries=3):
     h = {"User-Agent": UA, "Accept": "application/json", "Cache-Control": "no-cache", "Pragma": "no-cache"}
     if headers: h.update(headers)
     last = None
     for i in range(retries):
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout) as r:
-                return json.load(r)
+                return json.load(r), as_of(r.headers)
         except urllib.error.HTTPError as e:
             last = e
             if e.code in (401, 451) or (e.code == 403 and i == retries - 1):   # blocked / geo-restricted
@@ -215,18 +228,25 @@ def fetch_pinnacle(log=print, errors=None, live=False):
     started game are never used."""
     def one(sid):
         try:
-            m = http_json(f"{PIN_BASE}/sports/{sid}/matchups", pin_headers())
+            m, m_as_of = http_json_meta(f"{PIN_BASE}/sports/{sid}/matchups", pin_headers())
             k = [] if live else http_json(f"{PIN_BASE}/sports/{sid}/markets/straight", pin_headers())
-            return sid, m, k
+            alt = None
+            if live:   # Pinnacle's CDN caches each URL separately (up to ~15 min): keep the per-sport copy as a second source
+                try: alt = http_json_meta(f"{PIN_BASE}/sports/{sid}/markets/live/straight", pin_headers(), timeout=20, retries=1)
+                except Exception: alt = None
+            return sid, m, (k, alt, m_as_of)
         except Exception as e:
             log(f"Pinnacle sport {sid} failed: {e}")
             if errors is not None: errors.append(f"Pinnacle {PIN_SPORTS[sid]}: {e}")
-            return sid, [], []
+            return sid, [], ([], None, None)
     with ThreadPoolExecutor(4) as ex:
         res = list(ex.map(one, PIN_SPORTS))
     now = time.time()
     games = []
-    for sid, matchups, markets in res:
+    for sid, matchups, (markets, alt, m_as_of) in res:
+        alt_mk = {}
+        if alt:
+            for x in alt[0] or []: alt_mk.setdefault(x.get("matchupId"), []).append(x)
         mk = {}
         for x in markets:
             if x.get("status", "open") == "open":
@@ -246,7 +266,8 @@ def fetch_pinnacle(log=print, errors=None, live=False):
             sc = [((p.get("state") or {}).get("score")) for p in ps]
             g = dict(id=m["id"], parent=m.get("parentId"), pin_score=sc if all(isinstance(x, int) for x in sc) else None, sport=sid, league=m["league"]["name"],
                      home=home, away=away, start=m.get("startTime"), live=live, live_mode=m.get("liveMode"),
-                     clock=m.get("state") or {}, markets=[] if live else mk.get(m["id"], []), fetched=now)
+                     clock=m.get("state") or {}, markets=[] if live else mk.get(m["id"], []), fetched=now,
+                     alt=(alt_mk.get(m["id"], []), alt[1]) if alt else None, league_id=(m.get("league") or {}).get("id"), score_as_of=m_as_of)
             if not live and g["start"]:
                 st = datetime.fromisoformat(g["start"].replace("Z", "+00:00")).timestamp()
                 if st <= now: continue          # started: pre-match price is stale
@@ -258,12 +279,29 @@ def fetch_pinnacle(log=print, errors=None, live=False):
     log(f"Pinnacle: {len(games)} {'live' if live else 'pre-match'} games")
     return games
 
+_COPY_CACHE = {}   # one scan: url -> (json, as_of); league copies are shared by every game in the league
+
 def refresh_pinnacle_markets(g):
-    """Fresh per-game fetch for a live matchup, dropping closed/suspended/expired lines."""
-    try:
-        ms = http_json(f"{PIN_BASE}/matchups/{g['id']}/markets/straight", pin_headers(), timeout=20, retries=2)
-    except Exception as e:
-        g["markets"], g["fetch_error"] = [], str(e); return g
+    """Per-game fetch for a live matchup, dropping closed/suspended/expired lines. Pinnacle's public feed is CDN-cached,
+    so the per-matchup and per-sport copies can differ: keep the newer (higher market version) and record its age."""
+    urls = [f"{PIN_BASE}/matchups/{g['id']}/markets/straight", f"{PIN_BASE}/matchups/{g['id']}/markets/related/straight"]
+    if g.get("league_id"): urls.append(f"{PIN_BASE}/leagues/{g['league_id']}/markets/straight")
+    cands = []
+    for u in urls:
+        try:
+            if u not in _COPY_CACHE: _COPY_CACHE[u] = http_json_meta(u, pin_headers(), timeout=20, retries=1)
+            cands.append(_COPY_CACHE[u])
+        except Exception as e:
+            g.setdefault("fetch_error", str(e))
+    if g.get("alt") and g["alt"][0]: cands.append(g["alt"])
+    pick = {}   # per market key: highest version, ties -> most recently fetched copy
+    for body, t in cands:
+        for x in body or []:
+            if x.get("matchupId") != g["id"] or x.get("period") != 0: continue
+            v, c = x.get("version") or 0, pick.get(x.get("key"))
+            if not c or v > c[1] or (v == c[1] and (t or 0) > (c[2] or 0)): pick[x.get("key")] = (x, v, t)
+    g["as_of"] = {k: c[2] for k, c in pick.items()}
+    ms = [c[0] for c in pick.values()]
     now = time.time()
     ok = []
     for x in ms:
@@ -391,7 +429,8 @@ def pin_market(g, key):
     return next((x for x in g["markets"] if x["key"] == key), None)
 
 def fair_for(m, g, orient):
-    """returns (fair_prob_yes, desc, vig) or None"""
+    """returns (fair_prob_yes, desc, vig, (pinnacle market key, designation)) or None.
+    The (key, designation) pair lets the dashboard / Worker re-price the same line live (worker/src/live-core.js)."""
     smt = m.get("sportsMarketType")
     if m.get("periodType") or m.get("gameNumber"): return None
     label = (m.get("marketOptions") or [{}])[0].get("label", "") or ""
@@ -408,7 +447,7 @@ def fair_for(m, g, orient):
             d = side_of(title, orient)
         if d not in fp: return None
         if d != "draw" and "draw" not in fp and g["sport"] == 29: return None
-        return fp[d], f"Pinnacle ML {'/'.join(f'{p['price']:+d}' for p in ml['prices'])}", vig
+        return fp[d], f"Pinnacle ML {'/'.join(f'{p['price']:+d}' for p in ml['prices'])}", vig, ("s;0;m", d)
     if g["sport"] == 33 or g["sport"] == 12: return None   # tennis/esports handicaps use different units
     if g.get("live") and g["sport"] == 29 and smt == "spreads": return None  # in-running AH settles differently
     num = re.search(r"([+-]?\d+(?:\.\d+)?)\s*$", label)
@@ -423,7 +462,7 @@ def fair_for(m, g, orient):
             if d in pr and abs(float(pr[d].get("points", 1e9)) - line) < 1e-9 and len(pr) == 2:
                 probs, vig = devig([pr["home"]["price"], pr["away"]["price"]])
                 q = probs[0] if d == "home" else probs[1]
-                return q, f"Pinnacle spread {d} {line:+g} {pr[d]['price']:+d}", vig
+                return q, f"Pinnacle spread {d} {line:+g} {pr[d]['price']:+d}", vig, (x["key"], d)
         return None
     if smt == "totals":
         d = "over" if title.lower().startswith("over") or label.upper().startswith("O") else \
@@ -434,7 +473,7 @@ def fair_for(m, g, orient):
         pr = {p["designation"]: p for p in x["prices"]}
         if set(pr) != {"over", "under"}: return None
         probs, vig = devig([pr["over"]["price"], pr["under"]["price"]])
-        return (probs[0] if d == "over" else probs[1]), f"Pinnacle total {d} {abs(line):g} {pr[d]['price']:+d}", vig
+        return (probs[0] if d == "over" else probs[1]), f"Pinnacle total {d} {abs(line):g} {pr[d]['price']:+d}", vig, (x["key"], d)
     return None
 
 # ---------------------------------------------------------------- depth
@@ -556,6 +595,7 @@ def scan(log=print, max_days=14, orderbooks=True, ob_limit=4000, mode=None):
         if g: matched[e["eventId"]] = (g, orient)
     if live and matched:
         uniq = {id(g): g for g, _ in matched.values()}
+        _COPY_CACHE.clear()
         with ThreadPoolExecutor(6) as ex: list(ex.map(refresh_pinnacle_markets, uniq.values()))
     rows, n_markets, live_markets = [], 0, 0
     for e in events:
@@ -564,7 +604,9 @@ def scan(log=print, max_days=14, orderbooks=True, ob_limit=4000, mode=None):
         sc = scores.get(e["eventId"], {})
         score_note = None
         if g and live and g.get("pin_score") and re.fullmatch(r"\d+-\d+", str(sc.get("score") or "")):
-            if sorted(map(int, sc["score"].split("-"))) != sorted(g["pin_score"]):
+            newest_line = max([t for t in (g.get("as_of") or {}).values() if t] or [0])
+            # Pinnacle's score comes from a CDN copy too: only trust a mismatch if that copy is at least as new as the line
+            if sorted(map(int, sc["score"].split("-"))) != sorted(g["pin_score"]) and (g.get("score_as_of") or 0) >= newest_line:
                 score_note = f"score mismatch Jupiter {sc['score']} vs Pinnacle {'-'.join(map(str, g['pin_score']))}"
                 errors.append(f"{e['metadata']['title']}: {score_note} - fair odds rejected as stale")
                 g = None
@@ -581,10 +623,11 @@ def scan(log=print, max_days=14, orderbooks=True, ob_limit=4000, mode=None):
             for side, key in (("YES", "buyYesPriceUsd"), ("NO", "buyNoPriceUsd")):
                 p = (pr.get(key) or 0) / 1e6      # card quote: only tells us the side exists; never priced from it
                 if side == "NO" and not p: continue   # NO not offered (e.g. team markets: buy the other team instead)
-                q = desc = vig = None
+                q = desc = vig = None; pin = {}
                 if fair:
                     q = fair[0] if side == "YES" else 1 - fair[0]
                     desc, vig = fair[1], fair[2]
+                    if live: pin = dict(pin_id=g["id"], pin_sport=g["sport"], pin_key=fair[3][0], pin_d=fair[3][1])
                 label = m.get("title", "")
                 opt = (m.get("marketOptions") or [{}])[0].get("label")
                 if opt and opt not in ("Yes", "No"): label = opt
@@ -604,7 +647,8 @@ def scan(log=print, max_days=14, orderbooks=True, ob_limit=4000, mode=None):
                     closes=fmt_time(ct or e.get("beginAt")), starts=fmt_time(e.get("beginAt")),
                     close_ts=ct, link=link, depth_best=None, depth_ok=None, ob_ask=None,
                     price_ts=int(t0), fair_ts=int(g["fetched"]) if (g and q is not None) else None,
-                    price_src="not checked", score_note=score_note))
+                    price_src="not checked", score_note=score_note, event_id=e["eventId"],
+                    line_as_of=int(g["as_of"][fair[3][0]]) if (g and fair and live and (g.get("as_of") or {}).get(fair[3][0])) else None, **pin))
     live_markets = n_markets if live else 0
     # executable prices: the live order book (websocket) for every row that has a fair price - no pre-filter on
     # Jupiter's card quote, which can lag. Rows without a fair price can't have an edge, so they aren't priced.

@@ -4,5 +4,7 @@ window.SCANNER_CONFIG = {
   owner: "",            // e.g. "your-github-username"
   repo: "",             // e.g. "jup-scanner-dashboard"
   branch: "main",
-  workflow: "scan.yml"
+  workflow: "scan.yml",
+  // Live win-chance feed (the Cloudflare Worker's read-only GET /live). Leave as-is unless you deploy your own Worker.
+  liveUrl: "https://luck-society-livebets.dreiss324.workers.dev/live"
 };

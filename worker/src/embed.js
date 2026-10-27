@@ -1,5 +1,6 @@
 // Shared by the Worker (cooldown reuse) and the GitHub Action (post after a scan).
 // Builds the Luck Society Discord message from a results.json object.
+import { fetchLive, applyLiveRow, queryFor, bookAsk, JUP_BASE, lineTooOld } from "../../docs/live-core.js";
 export const GOLD = 0xf9d832, GREEN = 0x1fae4e, RED = 0xe5533d;
 const TYPE = { moneyline: "Moneyline", spreads: "Spread", totals: "Total" };
 const CAVEAT = "Live prices move fast: an edge can vanish before you click. Re-check the price on Jupiter and the market rules. Not financial advice. Bet responsibly. 🍀";
@@ -10,10 +11,37 @@ const clip = (s, n) => (s = String(s ?? "")).length > n ? s.slice(0, n - 1) + "�
 const etTime = unix => new Date(unix * 1000).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" }) + " ET";
 
 // same rule as the dashboard's Top picks: edge >= 0, not a suspicious >10pt edge, some size available, one per game, highest win chance first
+// Just before posting: re-read Pinnacle live lines + Jupiter scores for the candidate rows (same logic as the
+// dashboard / Worker /live) and, optionally, the Buy price from Jupiter's order book. Mutates data; returns a note.
+export async function refreshForCard(data, { getJSON, prices = true, maxBooks = 15 } = {}) {
+  if ((data.mode || "live") !== "live" || data.status === "error") return "";
+  const cand = (data.rows || []).filter(r => r.pin_id && r.edge_pts != null && r.edge_pts >= -0.05).sort((a, b) => (b.fair_prob || 0) - (a.fair_prob || 0));
+  if (!cand.length) return "";
+  const q = queryFor(cand), ids = new Set(q.ids), use = cand.filter(r => ids.has(String(r.pin_id)));
+  const live = await fetchLive(q, getJSON);
+  if (prices) {
+    const mids = [...new Set(use.filter(r => r.edge_pts >= -0.03).map(r => r.market_id))].slice(0, maxBooks);
+    const get = getJSON ? async (u, h) => { const x = await getJSON(u, h); return x && x.__live ? x.body : x; }
+      : async u => { const r = await fetch(u); if (!r.ok) throw new Error(String(r.status)); return r.json(); };
+    const books = Object.fromEntries(await Promise.all(mids.map(async m => [m, await get(`${JUP_BASE}/orderbook/${encodeURIComponent(m)}`, {}).catch(() => null)])));
+    for (const r of use) {
+      if (!(r.market_id in books) || !books[r.market_id]) continue;
+      const a = bookAsk(books[r.market_id], r.side);
+      r.price = a; r.price_src = a == null ? "no asks" : "order book"; r.price_ts = Math.floor(Date.now() / 1000);
+      if (a == null) r.edge_pts = r.ev_per_dollar = null;
+    }
+  }
+  let ok = 0;
+  for (const r of use) { if (r.score_at == null) r.score_at = data.scanned_at_unix; applyLiveRow(r, live); if (r.fair_live) ok++; }
+  data.live_refreshed_at = Math.floor(live.at / 1000);
+  return ok ? `⚡ Win chances, scores${prices ? " and prices" : ""} refreshed live just before posting.` : "";
+}
+
 export function topPicks(data, count = 5) {
   const seen = new Set(), out = [];
   // price = executable ask from Jupiter's live order book (what the Buy button charges); never the "% chance" meter
-  const rows = (data.rows || []).filter(r => r.price != null && r.price_src === "order book" && r.edge_pts != null && r.edge_pts >= 0 && r.edge_pts <= 0.10 &&
+  // live_flag = Pinnacle line suspended / gone / out of date, score changed since the line, scores disagree, or game ended -> never a pick
+  const rows = (data.rows || []).filter(r => !r.live_flag && !lineTooOld(r) && r.price != null && ["order book", "jupiter live"].includes(r.price_src) && r.edge_pts != null && r.edge_pts >= 0 && r.edge_pts <= 0.10 &&
     (r.depth_ok == null || r.depth_ok >= 5)).sort((a, b) => b.fair_prob - a.fair_prob);
   for (const r of rows) { if (out.length >= count) break; if (!seen.has(r.event)) { seen.add(r.event); out.push(r); } }
   return out;

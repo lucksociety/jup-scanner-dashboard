@@ -109,7 +109,7 @@ async function fetchResults(){const c=repoCfg();
  if(!r.ok)throw new Error('No results yet. Run your first scan.');return{d:await r.json(),src:'published'}}
 async function load(){try{const x=await fetchResults();data=x.d;data._src=x.src}catch(e){data=null;
  $('status').innerHTML='<span class="pill error">No data</span> '+esc(e.message);return}
- applyLive();showStatus();render();refreshPrices()}
+ applyAll();showStatus();render();refreshPrices();pollLive()}
 function showStatus(){const c=data.counts||{},st=data.status||'ok',live=(data.mode||'live')==='live';
  $('cLive').textContent=live?(c.live_events??0):(c.events||0).toLocaleString();
  $('cLive').previousElementSibling.textContent=live?'Live games':'Upcoming games';
@@ -123,7 +123,7 @@ function showStatus(){const c=data.counts||{},st=data.status||'ok',live=(data.mo
  $('status').innerHTML=`<span class="pill ${st}">${label}${data.stale?' · showing older results':''}</span>
  <span>${live?'<span class="dot"></span>Live mode':'Upcoming mode'}</span>
  ${data.stale?`<span>Last good scan: <b>${esc(data.last_success||'never')}</b></span>`:''}
- <span>Scan took ${data.seconds||'?'}s</span>${pxAt?`<span class="pxlive"><span class="dot"></span>Buy prices live from Jupiter's order book · ${ago(pxAt/1000)}</span>`:pxErr?`<span class="neg">${esc(pxErr)}</span>`:''}${live&&data.scanned_at_unix&&Date.now()/1000-data.scanned_at_unix>120?`<span class="old">Win chances are from the scan ${ago(data.scanned_at_unix)}. Scan again for fresh edges</span>`:''}<span>${data._src==='latest'?'Fresh from the latest scan':'Published copy (connect the Scan button for instant updates)'}</span>`;
+ <span>Scan took ${data.seconds||'?'}s</span>${pxAt?`<span class="pxlive"><span class="dot"></span>Buy prices live from Jupiter's order book · ${ago(pxAt/1000)}</span>`:pxErr?`<span class="neg">${esc(pxErr)}</span>`:''}${live&&liveOk()?`<span class="pxlive"><span class="dot"></span>Win chance updated ${ago(liveAt/1000)} · scores live${liveFlagged?` · ${liveFlagged} bet${liveFlagged>1?'s':''} paused (line suspended, out of date or scores disagree)`:''}</span>`:live&&data.scanned_at_unix&&Date.now()/1000-data.scanned_at_unix>120?`<span class="old">Win chances are from the scan ${ago(data.scanned_at_unix)}${liveErr?' (live win-chance feed unavailable: '+esc(liveErr)+')':''}. Scan again for fresh edges</span>`:''}<span>${data._src==='latest'?'Fresh from the latest scan':'Published copy (connect the Scan button for instant updates)'}</span>`;
  const errs=(data.errors||[]).filter(Boolean);
  $('errors').className='errors '+(st==='partial'?'partial':'');$('errors').style.display=errs.length?'block':'none';
  $('errors').innerHTML=(st==='error'?'<b>The last scan failed.</b> Showing the previous results (if any). ':'<b>Heads up:</b> ')+errs.map(e=>esc(plain(e))).join('<br>');
@@ -145,8 +145,9 @@ function render(){if(!data)return;const live=(data.mode||'live')==='live',c=data
  $('shown').textContent=rows.length+(rows.length===1?' bet':' bets');
  // top picks: highest win chance with edge >= 0, and a real amount available, max 1 per game
  const seen=new Set(),picks=[];
- const fresh=r=>!live||Date.now()/1000-(r.fair_ts||data.scanned_at_unix||0)<=300;   // live win chances older than 5 min are not trusted for picks
- [...rows].filter(r=>r.edge_pts!=null&&r.edge_pts>=0&&!(r.edge_pts>0.10)&&(r.depth_ok==null||r.depth_ok>=5)&&!r.closed&&fresh(r)).sort((a,b)=>b.fair_prob-a.fair_prob)
+ // live win chances: refreshed every ~5 s from the Worker's /live feed; if that feed is down, fall back to trusting them for 5 min
+ // paused rows (line suspended/pulled/out of date, scores disagree, game over) are never picks
+ [...rows].filter(r=>r.edge_pts!=null&&r.edge_pts>=0&&!(r.edge_pts>0.10)&&(r.depth_ok==null||r.depth_ok>=5)&&!r.closed&&!r.live_flag&&!lineOld(r)&&fairFresh(r)).sort((a,b)=>b.fair_prob-a.fair_prob)
   .forEach(r=>{if(picks.length<4&&!seen.has(r.event)){seen.add(r.event);picks.push(r)}});
  $('picksWrap').style.display=picks.length?'':'none';
  $('picks').innerHTML=picks.map((r,i)=>`<a class="pick" href="${esc(r.link)}" target="_blank" rel="noopener">
@@ -155,23 +156,23 @@ function render(){if(!data)return;const live=(data.mode||'live')==='live',c=data
   <div class="p-bet">${esc(r.selection)} <span class="p-ty">${esc(TYPE[r.market_type]||r.market_type)}</span></div>
   <div class="p-nums"><div><b>${pct(r.fair_prob)}</b><span>win chance</span></div><div><b>$${r.price.toFixed(2)}</b><span>buy price${r.price_src==='jupiter live'?' · live':''}</span></div>
   <div><b class="pos">+${(r.edge_pts*100).toFixed(1)}%</b><span>edge</span></div><div><b>${money(r.depth_ok)}</b><span>available</span></div></div>
-  <div class="p-foot">Updated ${ago(r.price_ts)} · Bet on Jupiter ↗</div></a>`).join('');
+  <div class="p-foot">${r.fair_live&&liveOk()?'Win chance '+ago(r.fair_ts)+' · ':''}Price ${ago(r.price_ts)} · Bet on Jupiter ↗</div></a>`).join('');
  const em=$('empty');if(!rows.length){em.style.display='block';
   em.innerHTML=live&&!(c.live_events)?'<div class="e-ico">🍀</div><b>No live games right now</b>Nothing is in progress on Jupiter at the moment. Hit Scan again once games are underway.'
    :live&&!(c.events_with_fair)?`<div class="e-ico">⏳</div><b>No sharp live lines yet</b>${c.live_events} live game(s) on Jupiter, but none had a fresh matching line to compare against.`
    :'<div class="e-ico">🔍</div><b>No bets match your filters</b>Try “Show: Everything priced” or lower the minimums.'}else em.style.display='none';
- $('tb').innerHTML=rows.slice(0,600).map(r=>`<tr>
+ $('tb').innerHTML=rows.slice(0,600).map(r=>`<tr${r.live_flag?' class="paused"':''}>
  <td data-l="Game" class="ev">${esc(r.event)}<div class="sub">${esc(r.league)}${r.in_play?' · <span class="live">LIVE</span>':''}</div></td>
- <td data-l="Score">${esc(r.score||'—')}<div class="sub">${esc(clock(r))}</div></td>
+ <td data-l="Score">${esc(r.score||'—')}<div class="sub">${esc(clock(r))}</div>${r.live_flag==='score mismatch'&&r.pin_score?`<div class="sub neg">sharp book: ${esc(r.pin_score.join('-'))}</div>`:''}</td>
  <td data-l="Bet" class="bet"><b>${esc(r.selection)}</b><div class="sub">${esc(TYPE[r.market_type]||r.market_type)}</div></td>
- <td data-l="Win chance" class="n"><b class="big">${pct(r.fair_prob)}</b></td>
+ <td data-l="Win chance" class="n"><b class="big">${pct(r.fair_prob)}</b>${r.fair_live&&liveOk()?`<div class="sub">${ago(r.fair_ts)}</div>`:''}</td>
  <td data-l="Price" class="n">${r.closed?'<span class="neg">closed</span>':r.price==null?'<span class="neg">no sellers</span>':'$'+r.price.toFixed(3)}<div class="sub">${r.closed||r.price==null?'':r.price_src==='jupiter live'?(Math.abs(r.live_move||0)>=0.005?`live · <span class="${r.live_move>0?'neg':'pos'}">${r.live_move>0?'▲':'▼'} ${(Math.abs(r.live_move)*100).toFixed(1)}¢</span> since scan`:'live order book'):r.price_src==='order book'?'order book':''}</div>${r.meter!=null?`<div class="sub meter" title="Jupiter's “% chance” meter/chart (5-minute chart point from ${etTime(r.meter_ts)}). It lags the real Buy price, so it is never used for edge.">Jupiter meter ${pct(r.meter)}</div>`:''}</td>
- <td data-l="Edge" class="n ${r.edge_pts>=0?'pos':'neg'}">${r.edge_pts==null?'—':(r.edge_pts>=0?'+':'')+(r.edge_pts*100).toFixed(1)+'%'}${live&&Date.now()/1000-(r.fair_ts||data.scanned_at_unix||0)>300?'<div class="sub old">old win chance</div>':''}</td>
+ <td data-l="Edge" class="n ${r.edge_pts>=0?'pos':'neg'}">${r.edge_pts==null?'—':(r.edge_pts>=0?'+':'')+(r.edge_pts*100).toFixed(1)+'%'}${r.live_flag?`<div class="sub flag">⏸ ${esc(flagText(r))}</div>`:live&&lineOld(r)?`<div class="sub flag">⏸ ${FLAG['line old']}</div>`:live&&!fairFresh(r)?'<div class="sub old">old win chance</div>':''}</td>
  <td data-l="Return / $1" class="n ${r.ev_per_dollar>=0?'pos':'neg'}">${r.ev_per_dollar==null?'—':(r.ev_per_dollar>=0?'+':'')+pct(r.ev_per_dollar)}</td>
  <td data-l="$ available" class="n">${money(r.depth_ok)}<div class="sub">${r.depth_best!=null?money(r.depth_best)+' at best price':''}</div></td>
  <td data-l="Updated" class="${r.price_ts?ageCls(r.price_ts):''}" title="Jupiter price ${etTime(r.price_ts)} · sharp line ${etTime(r.fair_ts)}">${r.price_ts?ago(r.price_ts):''}<div class="sub">${r.lag_s!=null?'lines '+r.lag_s+'s apart':''}</div></td>
  <td data-l="Start (ET)">${esc(live?String(r.starts||'').replace(/^\w{3} \w{3} \d\d /,''):r.closes)}</td>
- <td data-l="Sharp line" class="src">${esc(String(r.fair_source||'').replace(/^Pinnacle /,''))}<div class="sub">${esc(r.pin_match)}</div>${r.warn?`<div class="w">⚠ ${esc(plain(r.warn))}</div>`:''}</td>
+ <td data-l="Sharp line" class="src">${esc(String(r.fair_source||'').replace(/^Pinnacle /,''))}<div class="sub">${esc(r.pin_match)}</div>${live&&r.line_as_of?(a=>`<div class="sub ${a>300?'old':''}" title="Pinnacle's public feed is cached by Pinnacle for up to ~15 min. This is how old the sharp line behind the win chance is (as of ${etTime(r.line_as_of)}).">line ${a<60?a+'s':Math.round(a/60)+' min'} old</div>`)(Math.max(0,Math.round(Date.now()/1000-r.line_as_of))):''}${r.warn?`<div class="w">⚠ ${esc(plain(r.warn))}</div>`:''}</td>
  <td class="go"><a href="${esc(r.link)}" target="_blank" rel="noopener" class="btn-bet">Bet ↗</a></td></tr>`).join('')}
 // ---- live Buy-button prices in the browser. jup.ag's Buy Yes / Buy No buttons read the order-book websocket below:
 // buying YES fills against NO bids, so ask(YES) = 1 - best NO bid (and vice versa). We subscribe to the same feed.
@@ -200,7 +201,7 @@ function wsConnect(){if(ws&&ws.readyState<2)return;wsSubs=new Set();
   if(d.type==='orderbook'&&d.marketId){livePx[d.marketId]={book:d,ts:Date.now()};pxAt=Date.now();wsDirty=true}};
  ws.onclose=()=>{ws=null;setTimeout(()=>{if(!document.hidden)wsConnect()},5000)};ws.onerror=()=>{pxErr='Live Jupiter order books unavailable right now'}}
 function wsSync(){if(!data||!ws||ws.readyState!==1)return;for(const id of liveIds())if(!wsSubs.has(id)){ws.send(JSON.stringify({type:'subscribe',marketId:id}));wsSubs.add(id)}}
-setInterval(()=>{if(wsDirty&&data&&!scanning){wsDirty=false;applyLive();showStatus();render()}},2000);
+setInterval(()=>{if(wsDirty&&data&&!scanning){wsDirty=false;applyAll();showStatus();render()}},2000);
 // fallback + market status: every 15s, REST order books for anything the socket hasn't updated, and open/closed status
 async function refreshPrices(){if(!data||pxBusy||document.hidden||scanning)return;pxBusy=true;wsConnect();wsSync();
  try{const ids=liveIds().slice(0,80);let i=0,ok=0;const work=async()=>{while(i<ids.length){const id=ids[i++];
@@ -209,7 +210,36 @@ async function refreshPrices(){if(!data||pxBusy||document.hidden||scanning)retur
    try{const r=await fetch(`${JUP}/orderbook/${encodeURIComponent(id)}?t=${Date.now()}`,{cache:'no-store'});if(!r.ok)continue;
     const b=await r.json();if(b&&(b.yes_dollars||b.no_dollars)&&!(livePx[id]&&Date.now()-livePx[id].ts<20000)){livePx[id]={book:b,ts:Date.now()};ok++}}catch(e){}}};
   await Promise.all(Array.from({length:6},work));if(ok){pxAt=Math.max(pxAt,Date.now()-1);pxErr=''}else if(ids.length&&!pxAt)pxErr='Live Jupiter prices unavailable right now';
-  applyLive();showStatus();render()}finally{pxBusy=false}}
+  applyAll();showStatus();render()}finally{pxBusy=false}}
+// ---- live win chances: every ~5 s the Worker's GET /live re-reads Pinnacle's live line for exactly the market each row
+// was matched to (de-vigged, same math as the scanner) plus Jupiter's scoreboard; we recompute edge with the live Buy price.
+const LIVE_URL=(window.SCANNER_CONFIG||{}).liveUrl||'https://luck-society-livebets.dreiss324.workers.dev/live';
+let LC=null,liveData=null,liveAt=0,liveErr='',liveBusy=false,liveFlagged=0,liveFails=0;const scoreSeen={};
+const liveOk=()=>liveAt&&Date.now()-liveAt<30000;
+function fairFresh(r){const t=r.fair_ts||data.scanned_at_unix||0,a=Date.now()/1000-t;return r.fair_live&&liveOk()?a<=30:a<=300}
+const FLAG={'suspended':'sharp line suspended','line off':'sharp line pulled','score mismatch':'scores disagree','line old':'sharp line over 5 min old','line behind score':'score changed, line not updated yet','ended':'game over'};
+const flagText=r=>FLAG[r.live_flag]||r.live_flag;
+const lineOld=r=>!!r.line_as_of&&Date.now()/1000-r.line_as_of>300;   // same 5-min rule as live-core.js LINE_MAX_AGE_S
+function applyFair(){if(!data||!liveData||!LC||(data.mode||'live')!=='live')return;liveFlagged=0;
+ for(const r of data.rows||[]){if(r._scanScore===undefined)r._scanScore=r.score??null;const s=scoreSeen[r.event_id];if(s&&r.score!=null)r.score=s.score;   // score change times tracked per game below
+  LC.applyLiveRow(r,liveData,s&&s.changedAt);if(r.live_flag||lineOld(r))liveFlagged++}}
+function applyAll(){applyLive();applyFair()}
+async function pollLive(){if(!data||(data.mode||'live')!=='live'||document.hidden||liveBusy||scanning)return;liveBusy=true;
+ try{LC=LC||await import('./live-core.js');
+  const all=data.rows||[],cand=all.filter(r=>r.edge_pts!=null&&r.edge_pts>=-0.05).sort((a,b)=>(b.fair_prob||0)-(a.fair_prob||0));
+  const q=LC.queryFor([...cand,...filtered(),...all]);if(!q.ids.length&&!q.events.length)return;
+  const r=await fetch(`${LIVE_URL}?ids=${q.ids.join(',')}&sports=${q.sports.join(',')}&events=${encodeURIComponent(q.events.join(','))}`,{cache:'no-store'});
+  if(!r.ok)throw new Error(r.status===429?'rate limited':'feed said '+r.status);
+  const d=await r.json();const now=Date.now();
+  // first look at a game: if its score already differs from the scan's, it changed after the scan (scan time = safe lower bound)
+  const scanSc={};for(const r of all)if(r.event_id&&!(r.event_id in scanSc))scanSc[r.event_id]=r._scanScore===undefined?r.score:r._scanScore;
+  for(const[e,j]of Object.entries(d.jup||{})){const p=scoreSeen[e];
+   if(!p)scoreSeen[e]={score:j.score,changedAt:(scanSc[e]!=null&&j.score!=null&&String(scanSc[e])!==String(j.score)?(data.scanned_at_unix||0)*1000:null)};
+   else if(p.score!==j.score)scoreSeen[e]={score:j.score,changedAt:p.seenAt||now};   // changed after we last saw the old score
+   scoreSeen[e].seenAt=now}
+  liveData=d;liveAt=now;liveErr='';liveFails=0;applyAll();showStatus();render()}
+ catch(e){liveFails++;liveErr=e.message||'unavailable';if(liveFails>=3&&data){showStatus();render()}}finally{liveBusy=false}}
+setInterval(pollLive,5000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)pollLive()});
 function prog(html,cls=''){const p=$('progress');p.style.display=html?'flex':'none';p.className='progress '+cls;p.innerHTML=html}
 function scanBtn(on){$('scanNow').disabled=on;$('scanNow').classList.toggle('busy',on);$('scanNow').querySelector('.lbl').textContent=on?'Scanning…':'Scan now'}
 async function scan(){const c=repoCfg();
@@ -234,7 +264,7 @@ async function scan(){const c=repoCfg();
   for(let i=0;i<10;i++){const x=await fetchResults();
    if(x.d.request_id===rid||(x.d.scanned_at_unix||0)*1000>=t0){data=x.d;data._src=x.src;ok=true;break}await sleep(3000)}
   if(!ok)throw new Error('The scan finished but its results could not be found. Press Reload.');
-  applyLive();showStatus();render();refreshPrices();prog(`✓ Fresh ${mode==='live'?'live':'upcoming'} results, ready in ${el()}.`,'done');setTimeout(()=>{if(!scanning)prog('')},15000)
+  applyAll();showStatus();render();refreshPrices();pollLive();prog(`✓ Fresh ${mode==='live'?'live':'upcoming'} results, ready in ${el()}.`,'done');setTimeout(()=>{if(!scanning)prog('')},15000)
  }catch(e){prog('✗ '+(e.message.includes('<a ')?e.message:esc(e.message)),'err')}
  finally{scanning=false;scanBtn(false)}}
 function openSettings(msg){const c=repoCfg();$('settings').style.display='block';$('tok').value=c.token;$('own').value=c.owner;$('rep').value=c.repo;$('br').value=c.branch;$('tokMsg').textContent=msg||'';$('settings').scrollIntoView({behavior:'smooth',block:'start'})}

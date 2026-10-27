@@ -10,6 +10,12 @@ WORKFLOW_FILE = "scan.yml"
 DASHBOARD_URL = "https://lucksociety.github.io/jup-scanner-dashboard/"
 COOLDOWN_SECONDS = "60"
 
+# Per-IP rate limit for the public read-only GET /live endpoint (dashboard live win chances): 25 requests / 10 s per IP.
+[[ratelimits]]
+name = "LIVE_LIMITER"
+namespace_id = "1001"
+simple = { limit = 25, period = 10 }
+
 # Secrets (set with `npx wrangler secret put NAME`, never put them in this file):
 #   DISCORD_PUBLIC_KEY   Discord Developer Portal -> your app -> General Information -> Public Key
 #   GITHUB_TOKEN         classic token with only the public_repo scope (same kind as the dashboard's Scan button)

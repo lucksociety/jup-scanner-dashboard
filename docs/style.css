@@ -128,3 +128,6 @@ footer{margin-top:28px;color:var(--mut);font-size:12.5px;line-height:1.6;text-al
 }
 .pxlive{color:var(--clover);display:inline-flex;align-items:center;gap:6px}
 .sub.meter{color:var(--mut);font-style:italic;opacity:.85}
+/* live win-chance feed: bets paused because the sharp line is suspended/out of date or the scores disagree */
+tr.paused td{opacity:.55}tr.paused td.go,tr.paused td:nth-child(6){opacity:1}
+.sub.flag{color:var(--warn);font-weight:600;white-space:nowrap}
