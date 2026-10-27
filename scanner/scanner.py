@@ -2,7 +2,11 @@
 """
 Jupiter Prediction Market scanner (sports + esports only).
 
-Prices:   Jupiter prediction API (prices in micro-USD; a YES contract pays $1).
+Prices:   the executable ask = exactly what jup.ag's Buy Yes / Buy No button charges. jup.ag's trade ticket
+          reads it from its live order-book websocket (prediction-market-price-service.fly.dev/ws/orderbook):
+          buying YES consumes NO bids, so ask(YES) = 1 - best NO bid and vice versa. We read the same socket.
+          NOT used for edge: the "% chance" meter/chart on jup.ag (5-minute forecast history, lags badly) and
+          the `pricing` quote on market cards. The meter is only reported as a separate, labelled column.
 Fair odds: Pinnacle (sharpest sportsbook) via its public guest API, de-vigged.
 Edge:     fair_prob - (ask + Jupiter fee)   fee/contract = 0.07 * p * (1-p)
 EV/$1:    fair_prob / (ask + fee) - 1
@@ -10,7 +14,7 @@ EV/$1:    fair_prob / (ask + fee) - 1
 No fair price -> reported as "no edge data" (never invented).
 Stdlib only. Usage:  python3 scanner.py [--csv out.csv] [--json out.json]
 """
-import json, re, sys, urllib.error, time, math, unicodedata, urllib.request, urllib.parse, argparse, os
+import base64, json, re, socket, ssl, struct, sys, urllib.error, time, math, unicodedata, urllib.request, urllib.parse, argparse, os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -94,8 +98,110 @@ def fetch_scores(event_ids):
     return out
 
 def fetch_orderbook(mid):
+    """REST order book. Same data as the websocket but cached server-side (seen lagging it by ~5-10s), so it is
+    only a fallback when the socket is unreachable."""
     try: return jup_get(f"/orderbook/{mid}")
     except Exception: return None
+
+# ---- jup.ag's own live order-book websocket (minimal stdlib client: subscribe, read one snapshot per market)
+WS_HOST = os.environ.get("JUP_WS_HOST", "prediction-market-price-service.fly.dev")
+
+def _ws_send(sock, text):
+    data = text.encode(); n = len(data); hdr = bytearray([0x81])
+    if n < 126: hdr.append(0x80 | n)
+    elif n < 65536: hdr.append(0x80 | 126); hdr += struct.pack(">H", n)
+    else: hdr.append(0x80 | 127); hdr += struct.pack(">Q", n)
+    mask = os.urandom(4); hdr += mask
+    sock.sendall(bytes(hdr) + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+
+def _ws_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        c = sock.recv(n - len(buf))
+        if not c: raise ConnectionError("websocket closed")
+        buf += c
+    return buf
+
+def _ws_frame(sock):
+    b0, b1 = _ws_exact(sock, 2); n = b1 & 0x7F
+    if n == 126: n = struct.unpack(">H", _ws_exact(sock, 2))[0]
+    elif n == 127: n = struct.unpack(">Q", _ws_exact(sock, 8))[0]
+    mask = _ws_exact(sock, 4) if b1 & 0x80 else None
+    data = _ws_exact(sock, n)
+    if mask: data = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+    return b0 & 0x80, b0 & 0x0F, data
+
+def ws_orderbooks(mids, timeout=15.0):
+    """{marketId: (book, unix_ts)} from the websocket jup.ag's Buy buttons use. Missing ids = no snapshot."""
+    mids = list(dict.fromkeys(mids)); want = set(mids); got = {}
+    if not mids: return got
+    sock = ssl.create_default_context().wrap_socket(socket.create_connection((WS_HOST, 443), timeout=10), server_hostname=WS_HOST)
+    try:
+        key = base64.b64encode(os.urandom(16)).decode()
+        sock.sendall((f"GET /ws/orderbook HTTP/1.1\r\nHost: {WS_HOST}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                      f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\nOrigin: https://jup.ag\r\n"
+                      f"User-Agent: {UA}\r\n\r\n").encode())
+        resp = b""
+        while b"\r\n\r\n" not in resp:
+            c = sock.recv(4096)
+            if not c: raise ConnectionError("websocket handshake closed")
+            resp += c
+        if b" 101 " not in resp.split(b"\r\n")[0]: raise ConnectionError(resp.split(b"\r\n")[0].decode(errors="replace"))
+        for m in mids: _ws_send(sock, json.dumps({"type": "subscribe", "marketId": m}))
+        end = time.time() + timeout; parts = []
+        while len(got) < len(want) and time.time() < end:
+            sock.settimeout(max(0.1, end - time.time()))
+            try: fin, op, data = _ws_frame(sock)
+            except socket.timeout: break
+            if op == 8: break
+            if op not in (0, 1): continue
+            parts.append(data)
+            if not fin: continue
+            msg, parts = b"".join(parts), []
+            try: d = json.loads(msg)
+            except Exception: continue
+            if d.get("type") == "orderbook" and d.get("marketId") in want: got[d["marketId"]] = (d, time.time())
+    finally:
+        try: sock.close()
+        except Exception: pass
+    return got
+
+def fetch_books(mids, log=print):
+    """Live order books, websocket first (what the Buy button reads), REST only for anything it missed.
+    Returns {marketId: (book or None, unix_ts, source)}."""
+    mids = list(dict.fromkeys(mids)); out = {}
+    for i in range(0, len(mids), 800):
+        try:
+            for mid, (b, ts) in ws_orderbooks(mids[i:i + 800]).items(): out[mid] = (b, ts, "ws")
+        except Exception as e:
+            log(f"order-book websocket failed ({e}); falling back to REST /orderbook")
+    miss = [m for m in mids if m not in out]
+    if miss:
+        with ThreadPoolExecutor(8) as ex:
+            for mid, b, ts in ex.map(lambda m: (m, fetch_orderbook(m), time.time()), miss): out[mid] = (b, ts, "rest")
+    return out
+
+def fetch_meter(mid):
+    """jup.ag's "% chance" meter / chart legend = last point of the 5-minute forecast history (YES side).
+    Display only - it lags the tradable price, so it is never used for edge. Returns (chance, unix_ts) or None."""
+    try:
+        h = jup_get("/forecast", marketId=mid).get("forecast_history") or []
+        h = [x for x in h if x.get("numerical_forecast") is not None]
+        if not h: return None
+        last = max(h, key=lambda x: x.get("end_period_ts") or 0)
+        return float(last["numerical_forecast"]) / 100, int(last.get("end_period_ts") or 0)
+    except Exception:
+        return None
+
+def add_meter(rows, max_markets=150):
+    """Attach the jup.ag meter reading (side-adjusted) to rows as r['meter'] / r['meter_ts'] for display."""
+    mids = list(dict.fromkeys(r["market_id"] for r in rows))[:max_markets]
+    with ThreadPoolExecutor(6) as ex: got = dict(zip(mids, ex.map(fetch_meter, mids)))
+    for r in rows:
+        g = got.get(r["market_id"])
+        r["meter"] = None if not g else round(g[0] if r["side"] == "YES" else 1 - g[0], 4)
+        r["meter_ts"] = None if not g else g[1]
+    return rows
 
 # ---------------------------------------------------------------- Pinnacle
 UNIT_RANK = {"Regular": 0, None: 0, "Sets": 1, "Games": 2}
@@ -333,7 +439,7 @@ def fair_for(m, g, orient):
 
 # ---------------------------------------------------------------- depth
 def depth_info(ob, side, fair):
-    """Buying YES consumes NO bids (ask = 1 - no bid) and vice versa.
+    """Buying YES consumes NO bids (ask = 1 - best NO bid) and vice versa - identical to jup.ag's Buy button.
     returns (best_ask, $ at best ask, $ fillable while edge >= 0)"""
     if not ob: return None, None, None
     opp = ob.get("no_dollars" if side == "YES" else "yes_dollars") or []
@@ -347,9 +453,11 @@ def depth_info(ob, side, fair):
 # ---------------------------------------------------------------- pricing / re-check
 def finalize(r, live):
     """(Re)compute fee, edge, EV and warnings from r['price'] and r['fair_prob']."""
-    p = r["price"]; r["fee"] = round(fee_per_contract(p), 4); r["implied_prob"] = round(p, 4)
+    p = r["price"]
+    r["fee"] = None if p is None else round(fee_per_contract(p), 4)
+    r["implied_prob"] = None if p is None else round(p, 4)
     r["edge_pts"] = r["ev_per_dollar"] = None
-    if r["fair_prob"] is not None:
+    if r["fair_prob"] is not None and p is not None and r["price_src"] == "order book":   # edge only from a real ask
         cost = p + fee_per_contract(p)
         r["edge_pts"] = round(r["fair_prob"] - cost, 4); r["ev_per_dollar"] = round(r["fair_prob"] / cost - 1, 4)
         r["lag_s"] = abs(r["price_ts"] - r["fair_ts"]) if r.get("fair_ts") else None
@@ -357,60 +465,43 @@ def finalize(r, live):
     if r["edge_pts"] is not None and r["edge_pts"] > 0.10: w.append("edge >10pts: verify match/rules/score")
     if r.get("score_note"): w.append(r["score_note"])
     if r.get("pin_live_mode") == "danger_zone": w.append("Pinnacle danger-zone line (attack in progress)")
-    if r["price_src"] == "no asks": w.append("no asks on book")
+    if r["price_src"] == "no asks": w.append("no sellers on the book")
+    if r["price_src"] == "no book": w.append("live order book unavailable")
     if r.get("price_move") is not None and abs(r["price_move"]) >= MOVE_FLAG:
         w.append(f"price moved {r['price_move'] * 100:+.1f}c during scan")
-    if r.get("quote_gap") is not None and abs(r["quote_gap"]) > 0.011:
-        w.append(f"Jupiter quote {r['ui_price']:.3f} vs book {r['price']:.3f}")
     if r["edge_pts"] is not None and r["edge_pts"] >= 0 and r["depth_ok"] == 0: w.append("no fill at +EV price")
     r["warn"] = "; ".join(w)
-    if live and r["price_src"] == "no asks": r["edge_pts"] = r["ev_per_dollar"] = None   # cannot be bet
     return r
 
 MOVE_FLAG = float(os.environ.get("PRICE_MOVE_FLAG", "0.02"))   # flag rows whose ask moved >= 2c since first read
 
-def fetch_market(mid):
-    """Jupiter market record; pricing.buyYesPriceUsd / buyNoPriceUsd is exactly what jup.ag's market page shows."""
-    try: return jup_get(f"/markets/{mid}")
-    except Exception: return None
-
-def recheck_prices(rows, live, log=print, max_markets=400):
-    """Right before results are written: re-fetch every row's live order book AND the market quote that jup.ag
-    displays, replace the price with the fresh best ask, re-compute edge, flag moves, drop closed markets.
-    Returns (kept_rows, info)."""
+def recheck_prices(rows, live, log=print, max_markets=5000):
+    """Right before results are written: re-read every row's live order book from jup.ag's websocket (the
+    Buy-button price), replace the price with that ask, re-compute edge, flag moves. No ask -> no edge.
+    Returns (rows, info)."""
     mids = list(dict.fromkeys(r["market_id"] for r in rows))[:max_markets]
-    if not mids: return rows, dict(checked=0, moved=0, dropped=0, at=int(time.time()))
-    def both(mid):
-        m = fetch_market(mid); ob = fetch_orderbook(mid)
-        return mid, m, ob, time.time()
-    with ThreadPoolExecutor(8) as ex:
-        got = {mid: (m, ob, ts) for mid, m, ob, ts in ex.map(both, mids)}
-    kept, moved, dropped = [], 0, 0
+    if not mids: return rows, dict(checked=0, moved=0, no_ask=0, source="ws", at=int(time.time()))
+    got = fetch_books(mids, log)
+    moved = no_ask = 0
     for r in rows:
-        if r["market_id"] not in got: kept.append(r); continue
-        m, ob, ts = got[r["market_id"]]
-        if m is not None and m.get("status") != "open":
-            dropped += 1; continue                                  # closed/settled since the first read
-        pr = (m or {}).get("pricing") or {}
-        q = pr.get("buyYesPriceUsd" if r["side"] == "YES" else "buyNoPriceUsd")
-        q = q / 1e6 if q else None
+        if r["market_id"] not in got: finalize(r, live); continue
+        ob, ts, src = got[r["market_id"]]
         a, b, c = depth_info(ob, r["side"], r["fair_prob"])
-        if a is None and q is None:
-            if ob is not None or m is not None:
-                r["price_src"] = "no asks"; r["price_ts"] = int(ts)
-            kept.append(finalize(r, live)); continue
-        fresh = a if a is not None else q
-        r["scan_price"] = r.get("scan_price", r["price"])
-        r["price_move"] = round(fresh - r["scan_price"], 4)
-        r["price"], r["price_ts"], r["ui_price"] = round(fresh, 4), int(ts), None if q is None else round(q, 4)
-        r["quote_gap"] = None if (q is None or a is None) else round(q - a, 4)
-        r["price_src"] = "order book" if a is not None else "quote"
-        if a is not None: r["ob_ask"], r["depth_best"], r["depth_ok"] = a, b, c
-        if abs(r["price_move"]) >= MOVE_FLAG: moved += 1
-        kept.append(finalize(r, live))
-    info = dict(checked=len(mids), moved=moved, dropped=dropped, at=int(time.time()))
+        r["scan_price"] = r["price"] if r.get("scan_price") is None else r["scan_price"]
+        r["price_ts"], r["book_src"] = int(ts), src
+        r["ob_ask"], r["depth_best"], r["depth_ok"] = a, b, c
+        if a is None:
+            r["price"], r["price_move"] = None, None
+            r["price_src"] = "no asks" if ob is not None else "no book"; no_ask += 1
+        else:
+            r["price"], r["price_src"] = a, "order book"
+            r["price_move"] = None if r["scan_price"] is None else round(a - r["scan_price"], 4)
+            if r["price_move"] is not None and abs(r["price_move"]) >= MOVE_FLAG: moved += 1
+        finalize(r, live)
+    info = dict(checked=len(mids), moved=moved, no_ask=no_ask,
+                source="ws" if all(v[2] == "ws" for v in got.values()) else "ws+rest", at=int(time.time()))
     log(f"price re-check: {info}")
-    return kept, info
+    return rows, info
 
 # ---------------------------------------------------------------- scan
 def fmt_time(ts):
@@ -419,7 +510,7 @@ def fmt_time(ts):
     except Exception:
         return ""
 
-def scan(log=print, max_days=14, orderbooks=True, ob_limit=600, mode=None):
+def scan(log=print, max_days=14, orderbooks=True, ob_limit=4000, mode=None):
     """mode: 'live' (default, in-progress games only, live Pinnacle lines) | 'upcoming' (pre-match)"""
     mode = (mode or os.environ.get("SCAN_MODE", "live")).lower()
     live = mode == "live"
@@ -488,8 +579,8 @@ def scan(log=print, max_days=14, orderbooks=True, ob_limit=600, mode=None):
             n_markets += 1
             fair = fair_for(m, g, orient) if g and g["markets"] else None
             for side, key in (("YES", "buyYesPriceUsd"), ("NO", "buyNoPriceUsd")):
-                p = (pr.get(key) or 0) / 1e6
-                if not (0.005 < p < 0.995): continue
+                p = (pr.get(key) or 0) / 1e6      # card quote: only tells us the side exists; never priced from it
+                if side == "NO" and not p: continue   # NO not offered (e.g. team markets: buy the other team instead)
                 q = desc = vig = None
                 if fair:
                     q = fair[0] if side == "YES" else 1 - fair[0]
@@ -501,7 +592,7 @@ def scan(log=print, max_days=14, orderbooks=True, ob_limit=600, mode=None):
                 rows.append(dict(
                     event=e["metadata"]["title"], league=e["metadata"].get("league") or e.get("subcategory"),
                     category=e["category"], sub=e.get("subcategory"), market_type=m.get("sportsMarketType") or "other",
-                    selection=label, side=side, market_id=m["marketId"], price=round(p, 4), list_price=round(p, 4),
+                    selection=label, side=side, market_id=m["marketId"], price=None, list_price=round(p, 4) if p else None,
                     fee=None, implied_prob=None, fair_prob=None if q is None else round(q, 4),
                     edge_pts=None, ev_per_dollar=None,
                     fair_source=desc, book_vig=None if vig is None else round(vig, 4),
@@ -513,28 +604,22 @@ def scan(log=print, max_days=14, orderbooks=True, ob_limit=600, mode=None):
                     closes=fmt_time(ct or e.get("beginAt")), starts=fmt_time(e.get("beginAt")),
                     close_ts=ct, link=link, depth_best=None, depth_ok=None, ob_ask=None,
                     price_ts=int(t0), fair_ts=int(g["fetched"]) if (g and q is not None) else None,
-                    price_src="event list", score_note=score_note))
+                    price_src="not checked", score_note=score_note))
     live_markets = n_markets if live else 0
-    # fresh order books: live = every priced row; upcoming = near/+EV candidates
-    if live:
-        cands = [r for r in rows if r["fair_prob"] is not None][:ob_limit]
-    else:
-        tmp = [r for r in rows if r["fair_prob"] is not None and r["fair_prob"] - r["price"] - fee_per_contract(r["price"]) >= -0.005]
-        cands = sorted(tmp, key=lambda r: -r["fair_prob"])[:ob_limit]
+    # executable prices: the live order book (websocket) for every row that has a fair price - no pre-filter on
+    # Jupiter's card quote, which can lag. Rows without a fair price can't have an edge, so they aren't priced.
+    cands = [r for r in rows if r["fair_prob"] is not None][:ob_limit]
     if orderbooks and cands:
-        mids = list({r["market_id"] for r in cands})
-        with ThreadPoolExecutor(8) as ex:
-            obs = dict(zip(mids, ex.map(lambda mid: (fetch_orderbook(mid), time.time()), mids)))
-        if not any(o for o, _ in obs.values()): errors.append("Jupiter /orderbook unavailable - using listed prices")
+        obs = fetch_books([r["market_id"] for r in cands], log)
+        if not any(o for o, _, _ in obs.values()): errors.append("Jupiter live order books unavailable - no edges computed")
         for r in cands:
-            ob, ts = obs[r["market_id"]]
+            ob, ts, src = obs.get(r["market_id"], (None, time.time(), "none"))
             a, b, c = depth_info(ob, r["side"], r["fair_prob"])
-            r["ob_ask"], r["depth_best"], r["depth_ok"] = a, b, c
-            if a is not None:
-                r["price"], r["price_ts"], r["price_src"] = a, int(ts), "order book"
-            elif ob is not None:
-                r["price_src"] = "no asks"   # nothing to buy right now
+            r["ob_ask"], r["depth_best"], r["depth_ok"], r["price_ts"], r["book_src"] = a, b, c, int(ts), src
+            if a is not None: r["price"], r["price_src"] = a, "order book"
+            else: r["price_src"] = "no asks" if ob is not None else "no book"   # nothing to buy -> no edge
     for r in rows: finalize(r, live)
+    rows = [r for r in rows if r["price"] is None or 0.005 < r["price"] < 0.995]
     rows.sort(key=lambda r: (r["edge_pts"] is None, -(r["fair_prob"] or 0)))
     ev_ids = {r["event"] for r in rows if r["fair_prob"] is not None}
     stats = dict(errors=errors, mode=mode, events=len(events), markets_scanned=n_markets, rows=len(rows),

@@ -133,17 +133,25 @@ To restrict who can use it: Server Settings → Integrations → Luck Society Li
 - Pinnacle: only the live child matchups (`isLive`, status `started`, period 0 open); tennis uses the "Sets" line. Each matched game is re-fetched with
   `/matchups/{id}/markets/straight` right before pricing; markets that are not `open` or past their `cutoffAt` are dropped. "danger zone" lines are flagged.
 - Live soccer handicaps are skipped (Pinnacle's in-running Asian handicap settles on the rest of the match, which doesn't map to Jupiter's spread).
-- Price = best ask from a fresh Jupiter order book for every priced live row (falls back to the listed price; rows with no asks get no edge).
-- **Price self-check:** right before `results.json` is written, every row is re-priced from a fresh `/orderbook/{id}` *and* `/markets/{id}`
-  (the same `buyYesPriceUsd` / `buyNoPriceUsd` quote jup.ag's market page displays). Closed markets are dropped, rows whose ask moved ≥ 2¢
-  during the scan are flagged, a book/quote gap > 1¢ is flagged, and `price_ts`, `scan_price`, `price_move`, `ui_price` are stored.
-- **Live prices on the dashboard:** the page itself re-reads the Jupiter quote for the shown bets every 15 s (straight from
-  `prediction-market-api.jup.ag`, no token needed) and recomputes the edge, showing "live · ▲/▼ X¢ since scan". In live mode, win chances
-  older than 5 minutes are marked "old win chance" and are left out of Top picks. Scan again for fresh edges.
+- **Price = the Buy button price, nothing else.** jup.ag's Buy Yes / Buy No buttons and order ticket read Jupiter's live order-book
+  websocket (`wss://prediction-market-price-service.fly.dev/ws/orderbook`, `{"type":"subscribe","marketId":…}`). Buying YES fills
+  against NO bids, so ask(YES) = 1 − best NO bid and vice versa. The scanner reads that same socket for every row with a sharp line
+  (stdlib client, ~2 s for 700 markets), with REST `/orderbook/{id}` only as a fallback (it is cached and was seen 5-10 s behind).
+  Fee is added on top. Rows with no seller on that side get **no edge** and are not shown.
+- **Not used for edge:** (1) jup.ag's "% chance" meter / chart legend. It is the last point of `/forecast`, a chart updated in
+  5-minute steps, and it was measured up to 36¢ away from the Buy price on live games. It is stored as `meter` / `meter_ts` and
+  shown greyed under the price as "Jupiter meter" for reference only. (2) the `pricing.buyYesPriceUsd` card quote (`list_price`),
+  which only tells the scanner which sides exist.
+- **Price self-check:** right before `results.json` is written, every row is re-priced from a fresh websocket snapshot. Rows whose ask
+  moved ≥ 2¢ during the scan are flagged; `price_ts`, `scan_price`, `price_move`, `book_src` are stored.
+- **Live prices on the dashboard:** the page subscribes to the same order-book websocket for the shown bets (no token needed),
+  recomputes ask, edge and "$ available" on every update, and shows "live · ▲/▼ X¢ since scan" or "no sellers". Every 15 s it also
+  checks market status (closed markets are marked) and uses REST `/orderbook` for any market the socket hasn't updated. In live mode,
+  win chances older than 5 minutes are marked "old win chance" and are left out of Top picks. Scan again for fresh edges.
 - **Updated** column = how long ago the price was read.
 
 ## Math
-- p = Jupiter ask price; a contract pays $1.
+- p = Jupiter ask price (the Buy button: 1 − best bid on the opposite side); a contract pays $1.
 - Fee per contract ≈ `0.07·p·(1−p)`. This is fitted to Jupiter's published fee table; Jupiter rounds the fee up to the cent per order.
 - Fair prob q = Pinnacle odds with the margin removed proportionally (2-way, or 3-way for soccer and cricket with a draw).
 - Edge = q − (p + fee).  EV per $1 = q/(p + fee) − 1.

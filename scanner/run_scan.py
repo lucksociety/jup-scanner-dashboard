@@ -14,7 +14,10 @@ ALT_BASE = "https://api.jup.ag/prediction/v1"
 KEEP = ["event", "league", "category", "market_type", "selection", "side", "price", "fee", "implied_prob",
         "fair_prob", "edge_pts", "ev_per_dollar", "fair_source", "pin_match", "in_play", "closes", "close_ts",
         "starts", "link", "depth_best", "depth_ok", "warn", "market_id", "score", "period", "elapsed",
-        "price_ts", "fair_ts", "lag_s", "price_src", "list_price", "scan_price", "price_move", "ui_price", "quote_gap"]
+        "price_ts", "fair_ts", "lag_s", "price_src", "book_src", "list_price", "scan_price", "price_move", "meter", "meter_ts"]
+# price      = executable ask from jup.ag's live order-book websocket (= the Buy button), the ONLY price used for edge
+# list_price = Jupiter's card quote at scan start (info only); meter = jup.ag's "% chance" meter (display only)
+MAX_ROWS = int(os.environ.get("MAX_ROWS", "1500"))
 MODE = os.environ.get("SCAN_MODE", "live").lower()
 REQUEST_ID = os.environ.get("SCAN_REQUEST_ID", "")
 
@@ -52,10 +55,9 @@ def main():
         rows = res["rows"]
         st = res["stats"]
         live = st["mode"] == "live"
-        # final self-check: fresh order book + jup.ag quote for every row about to be shown
-        recheck_min = MIN_EDGE_KEEP - 0.05 if live else max(MIN_EDGE_KEEP, -0.01)
+        # final self-check: re-read the live Buy-button ask (order-book websocket) for every row that could be shown
+        recheck_min = MIN_EDGE_KEEP - 0.05
         cands = [r for r in rows if r["fair_prob"] is not None and r["edge_pts"] is not None and r["edge_pts"] >= recheck_min]
-        if not live: cands = sorted(cands, key=lambda r: -(r["edge_pts"]))[:400]
         checked_ids = {id(r) for r in cands}
         cands, recheck = scanner.recheck_prices(cands, live, log=lambda s: print(s, flush=True))
         rest = [r for r in rows if id(r) not in checked_ids]
@@ -63,6 +65,11 @@ def main():
         st["positive"] = sum(1 for r in rows if r["edge_pts"] is not None and r["edge_pts"] >= 0)
         priced = [{k: r.get(k) for k in KEEP} for r in rows
                   if r["fair_prob"] is not None and r["edge_pts"] is not None and r["edge_pts"] >= MIN_EDGE_KEEP]
+        if len(priced) > MAX_ROWS:              # keep the file small: best edges win, then back to win-chance order
+            keep = {id(r) for r in sorted(priced, key=lambda r: -r["edge_pts"])[:MAX_ROWS]}
+            priced = [r for r in priced if id(r) in keep]
+        try: scanner.add_meter(sorted(priced, key=lambda r: -r["edge_pts"]))          # jup.ag's lagging "% chance" meter, shown separately for reference
+        except Exception as e: print("meter lookup failed:", e, flush=True)
         out = dict(status="ok" if not st["errors"] else "partial", errors=st["errors"], mode=st["mode"],
                    request_id=REQUEST_ID,
                    scanned_at=now_et(), scanned_at_unix=int(time.time()), last_success=now_et(),

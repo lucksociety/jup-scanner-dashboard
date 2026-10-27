@@ -116,4 +116,16 @@ w = await runAsync({ REQUEST_ID: "someone-else" }); assert.match(JSON.parse(got[
 w = await runAsync({ DISCORD_TOKEN: "plain_tok", DISCORD_RELAY_KEY: "" }); assert.equal(got[2].url, "/webhooks/app123/plain_tok/messages/@original");
 srv.close();
 console.log("✓ workflow step: decrypts token, PATCHes @original with embed; mismatched request -> error embed; plain token works");
+{ // prices come only from the order-book ask (jup.ag's Buy button); meter / quote / missing asks never make a pick
+  const base = { event: "A vs B", selection: "A", market_type: "moneyline", fair_prob: 0.7, edge_pts: 0.03, depth_ok: 100, link: "https://jup.ag/x" };
+  const d = { mode: "live", status: "ok", counts: { live_events: 3 }, rows: [
+    { ...base, event: "E1", price: 0.65, price_src: "order book", meter: 0.52 },
+    { ...base, event: "E2", price: 0.60, price_src: "quote" },
+    { ...base, event: "E3", price: null, price_src: "no asks", edge_pts: null } ] };
+  const p = topPicks(d, 5);
+  assert.deepEqual(p.map(r => r.event), ["E1"]);
+  const m = JSON.stringify(buildMessage(d));
+  assert.ok(m.includes("Buy price **$0.65**") && !m.includes("0.52"), "embed shows the order-book ask, not the meter");
+  console.log("✓ picks/embeds use only the order-book ask (meter, quote and no-seller rows excluded)");
+}
 console.log("\nALL TESTS PASSED");

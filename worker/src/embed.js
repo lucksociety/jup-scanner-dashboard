@@ -12,7 +12,8 @@ const etTime = unix => new Date(unix * 1000).toLocaleString("en-US", { timeZone:
 // same rule as the dashboard's Top picks: edge >= 0, not a suspicious >10pt edge, some size available, one per game, highest win chance first
 export function topPicks(data, count = 5) {
   const seen = new Set(), out = [];
-  const rows = (data.rows || []).filter(r => r.edge_pts != null && r.edge_pts >= 0 && r.edge_pts <= 0.10 &&
+  // price = executable ask from Jupiter's live order book (what the Buy button charges); never the "% chance" meter
+  const rows = (data.rows || []).filter(r => r.price != null && r.price_src === "order book" && r.edge_pts != null && r.edge_pts >= 0 && r.edge_pts <= 0.10 &&
     (r.depth_ok == null || r.depth_ok >= 5)).sort((a, b) => b.fair_prob - a.fair_prob);
   for (const r of rows) { if (out.length >= count) break; if (!seen.has(r.event)) { seen.add(r.event); out.push(r); } }
   return out;
@@ -49,7 +50,7 @@ export function buildMessage(data, { count = 5, dashboardUrl = "", logoUrl = "",
       name: clip(`${["🥇", "🥈", "🥉"][i] || "#" + (i + 1)} ${r.selection} (${TYPE[r.market_type] || r.market_type})`, 256),
       value: clip([
         `${r.in_play ? "🔴 " : ""}${r.event}${clock ? ` · **${clock}**` : ""}`,
-        `Win chance **${pct(r.fair_prob)}** · Price **$${r.price.toFixed(2)}** · Edge **+${(r.edge_pts * 100).toFixed(1)}%** · Available **${money(r.depth_ok)}**`,
+        `Win chance **${pct(r.fair_prob)}** · Buy price **$${r.price.toFixed(2)}** · Edge **+${(r.edge_pts * 100).toFixed(1)}%** · Available **${money(r.depth_ok)}**`,
         `[Bet on Jupiter ↗](${r.link})`,
       ].join("\n"), 1024),
     };
@@ -60,7 +61,7 @@ export function buildMessage(data, { count = 5, dashboardUrl = "", logoUrl = "",
       ...base, color: live ? GREEN : GOLD,
       title: live ? `🔥 Top ${picks.length} live bets` : `🔥 Top ${picks.length} upcoming bets`,
       ...(dashboardUrl ? { url: dashboardUrl } : {}),
-      description: `${summary}${note ? `\n${note}` : ""}\nRanked by win chance, Jupiter fees included. ${links}`.trim(),
+      description: `${summary}${note ? `\n${note}` : ""}\nRanked by win chance. Buy price = Jupiter's order-book ask (the Buy button), fees included. ${links}`.trim(),
       fields: [...fields, { name: "\u200b", value: `*${CAVEAT}*` }],
     }],
     allowed_mentions: { parse: [] },

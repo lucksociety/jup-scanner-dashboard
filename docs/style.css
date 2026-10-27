@@ -127,3 +127,4 @@ footer{margin-top:28px;color:var(--mut);font-size:12.5px;line-height:1.6;text-al
  .set-grid{grid-template-columns:1fr}
 }
 .pxlive{color:var(--clover);display:inline-flex;align-items:center;gap:6px}
+.sub.meter{color:var(--mut);font-style:italic;opacity:.85}
