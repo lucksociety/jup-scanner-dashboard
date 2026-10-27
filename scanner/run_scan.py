@@ -14,7 +14,7 @@ ALT_BASE = "https://api.jup.ag/prediction/v1"
 KEEP = ["event", "league", "category", "market_type", "selection", "side", "price", "fee", "implied_prob",
         "fair_prob", "edge_pts", "ev_per_dollar", "fair_source", "pin_match", "in_play", "closes", "close_ts",
         "starts", "link", "depth_best", "depth_ok", "warn", "market_id", "score", "period", "elapsed",
-        "price_ts", "fair_ts", "lag_s", "price_src", "list_price"]
+        "price_ts", "fair_ts", "lag_s", "price_src", "list_price", "scan_price", "price_move", "ui_price", "quote_gap"]
 MODE = os.environ.get("SCAN_MODE", "live").lower()
 REQUEST_ID = os.environ.get("SCAN_REQUEST_ID", "")
 
@@ -50,9 +50,19 @@ def main():
         res = None
     if res is not None:
         rows = res["rows"]
-        priced = [{k: r.get(k) for k in KEEP} for r in rows
-                  if r["fair_prob"] is not None and r["edge_pts"] >= MIN_EDGE_KEEP]
         st = res["stats"]
+        live = st["mode"] == "live"
+        # final self-check: fresh order book + jup.ag quote for every row about to be shown
+        recheck_min = MIN_EDGE_KEEP - 0.05 if live else max(MIN_EDGE_KEEP, -0.01)
+        cands = [r for r in rows if r["fair_prob"] is not None and r["edge_pts"] is not None and r["edge_pts"] >= recheck_min]
+        if not live: cands = sorted(cands, key=lambda r: -(r["edge_pts"]))[:400]
+        checked_ids = {id(r) for r in cands}
+        cands, recheck = scanner.recheck_prices(cands, live, log=lambda s: print(s, flush=True))
+        rest = [r for r in rows if id(r) not in checked_ids]
+        rows = sorted(cands + rest, key=lambda r: (r["edge_pts"] is None, -(r["fair_prob"] or 0)))
+        st["positive"] = sum(1 for r in rows if r["edge_pts"] is not None and r["edge_pts"] >= 0)
+        priced = [{k: r.get(k) for k in KEEP} for r in rows
+                  if r["fair_prob"] is not None and r["edge_pts"] is not None and r["edge_pts"] >= MIN_EDGE_KEEP]
         out = dict(status="ok" if not st["errors"] else "partial", errors=st["errors"], mode=st["mode"],
                    request_id=REQUEST_ID,
                    scanned_at=now_et(), scanned_at_unix=int(time.time()), last_success=now_et(),
@@ -62,7 +72,7 @@ def main():
                                events_matched=st["events_matched"], rows_in_file=len(priced),
                                live_events=st["live_events"], live_markets=st["live_markets"],
                                events_with_fair=st["events_with_fair"]),
-                   seconds=round(time.time() - started, 1), runner=runner, rows=priced)
+                   seconds=round(time.time() - started, 1), runner=runner, price_check=recheck, rows=priced)
     else:
         prev = load_prev()
         out = dict(status="error", errors=[err], mode=MODE, request_id=REQUEST_ID,

@@ -126,3 +126,4 @@ footer{margin-top:28px;color:var(--mut);font-size:12.5px;line-height:1.6;text-al
  td.n{text-align:left}td[data-l=Updated],td[data-l="Start (ET)"],td[data-l=Score]{white-space:normal}td[data-l="Start (ET)"]{display:none}td.go{grid-column:1/-1}.btn-bet{display:block;text-align:center;padding:10px}
  .set-grid{grid-template-columns:1fr}
 }
+.pxlive{color:var(--clover);display:inline-flex;align-items:center;gap:6px}

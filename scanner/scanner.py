@@ -32,7 +32,7 @@ PIN_SPORTS = {3: "baseball", 4: "basketball", 6: "boxing", 8: "cricket", 12: "es
               18: "handball", 19: "hockey", 22: "mma", 27: "rugby", 29: "soccer", 33: "tennis", 34: "volleyball"}
 
 def http_json(url, headers=None, timeout=60, retries=3):
-    h = {"User-Agent": UA, "Accept": "application/json"}
+    h = {"User-Agent": UA, "Accept": "application/json", "Cache-Control": "no-cache", "Pragma": "no-cache"}
     if headers: h.update(headers)
     last = None
     for i in range(retries):
@@ -344,6 +344,74 @@ def depth_info(ob, side, fair):
     ok = sum(p * s for p, s in asks if fair is not None and fair - (p + fee_per_contract(p)) >= 0)
     return round(best, 4), round(at_best, 2), round(ok, 2)
 
+# ---------------------------------------------------------------- pricing / re-check
+def finalize(r, live):
+    """(Re)compute fee, edge, EV and warnings from r['price'] and r['fair_prob']."""
+    p = r["price"]; r["fee"] = round(fee_per_contract(p), 4); r["implied_prob"] = round(p, 4)
+    r["edge_pts"] = r["ev_per_dollar"] = None
+    if r["fair_prob"] is not None:
+        cost = p + fee_per_contract(p)
+        r["edge_pts"] = round(r["fair_prob"] - cost, 4); r["ev_per_dollar"] = round(r["fair_prob"] / cost - 1, 4)
+        r["lag_s"] = abs(r["price_ts"] - r["fair_ts"]) if r.get("fair_ts") else None
+    w = []
+    if r["edge_pts"] is not None and r["edge_pts"] > 0.10: w.append("edge >10pts: verify match/rules/score")
+    if r.get("score_note"): w.append(r["score_note"])
+    if r.get("pin_live_mode") == "danger_zone": w.append("Pinnacle danger-zone line (attack in progress)")
+    if r["price_src"] == "no asks": w.append("no asks on book")
+    if r.get("price_move") is not None and abs(r["price_move"]) >= MOVE_FLAG:
+        w.append(f"price moved {r['price_move'] * 100:+.1f}c during scan")
+    if r.get("quote_gap") is not None and abs(r["quote_gap"]) > 0.011:
+        w.append(f"Jupiter quote {r['ui_price']:.3f} vs book {r['price']:.3f}")
+    if r["edge_pts"] is not None and r["edge_pts"] >= 0 and r["depth_ok"] == 0: w.append("no fill at +EV price")
+    r["warn"] = "; ".join(w)
+    if live and r["price_src"] == "no asks": r["edge_pts"] = r["ev_per_dollar"] = None   # cannot be bet
+    return r
+
+MOVE_FLAG = float(os.environ.get("PRICE_MOVE_FLAG", "0.02"))   # flag rows whose ask moved >= 2c since first read
+
+def fetch_market(mid):
+    """Jupiter market record; pricing.buyYesPriceUsd / buyNoPriceUsd is exactly what jup.ag's market page shows."""
+    try: return jup_get(f"/markets/{mid}")
+    except Exception: return None
+
+def recheck_prices(rows, live, log=print, max_markets=400):
+    """Right before results are written: re-fetch every row's live order book AND the market quote that jup.ag
+    displays, replace the price with the fresh best ask, re-compute edge, flag moves, drop closed markets.
+    Returns (kept_rows, info)."""
+    mids = list(dict.fromkeys(r["market_id"] for r in rows))[:max_markets]
+    if not mids: return rows, dict(checked=0, moved=0, dropped=0, at=int(time.time()))
+    def both(mid):
+        m = fetch_market(mid); ob = fetch_orderbook(mid)
+        return mid, m, ob, time.time()
+    with ThreadPoolExecutor(8) as ex:
+        got = {mid: (m, ob, ts) for mid, m, ob, ts in ex.map(both, mids)}
+    kept, moved, dropped = [], 0, 0
+    for r in rows:
+        if r["market_id"] not in got: kept.append(r); continue
+        m, ob, ts = got[r["market_id"]]
+        if m is not None and m.get("status") != "open":
+            dropped += 1; continue                                  # closed/settled since the first read
+        pr = (m or {}).get("pricing") or {}
+        q = pr.get("buyYesPriceUsd" if r["side"] == "YES" else "buyNoPriceUsd")
+        q = q / 1e6 if q else None
+        a, b, c = depth_info(ob, r["side"], r["fair_prob"])
+        if a is None and q is None:
+            if ob is not None or m is not None:
+                r["price_src"] = "no asks"; r["price_ts"] = int(ts)
+            kept.append(finalize(r, live)); continue
+        fresh = a if a is not None else q
+        r["scan_price"] = r.get("scan_price", r["price"])
+        r["price_move"] = round(fresh - r["scan_price"], 4)
+        r["price"], r["price_ts"], r["ui_price"] = round(fresh, 4), int(ts), None if q is None else round(q, 4)
+        r["quote_gap"] = None if (q is None or a is None) else round(q - a, 4)
+        r["price_src"] = "order book" if a is not None else "quote"
+        if a is not None: r["ob_ask"], r["depth_best"], r["depth_ok"] = a, b, c
+        if abs(r["price_move"]) >= MOVE_FLAG: moved += 1
+        kept.append(finalize(r, live))
+    info = dict(checked=len(mids), moved=moved, dropped=dropped, at=int(time.time()))
+    log(f"price re-check: {info}")
+    return kept, info
+
 # ---------------------------------------------------------------- scan
 def fmt_time(ts):
     try:
@@ -466,23 +534,7 @@ def scan(log=print, max_days=14, orderbooks=True, ob_limit=600, mode=None):
                 r["price"], r["price_ts"], r["price_src"] = a, int(ts), "order book"
             elif ob is not None:
                 r["price_src"] = "no asks"   # nothing to buy right now
-    for r in rows:
-        p = r["price"]; r["fee"] = round(fee_per_contract(p), 4); r["implied_prob"] = round(p, 4)
-        if r["fair_prob"] is not None:
-            cost = p + fee_per_contract(p)
-            r["edge_pts"] = round(r["fair_prob"] - cost, 4); r["ev_per_dollar"] = round(r["fair_prob"] / cost - 1, 4)
-            r["lag_s"] = abs(r["price_ts"] - r["fair_ts"]) if r["fair_ts"] else None
-        w = []
-        if r["edge_pts"] is not None and r["edge_pts"] > 0.10: w.append("edge >10pts: verify match/rules/score")
-        if r.get("score_note"): w.append(r["score_note"])
-        if r["pin_live_mode"] == "danger_zone": w.append("Pinnacle danger-zone line (attack in progress)")
-        if r["price_src"] == "no asks": w.append("no asks on book")
-        if r["edge_pts"] is not None and r["edge_pts"] >= 0 and r["depth_ok"] == 0: w.append("no fill at +EV price")
-        r["warn"] = "; ".join(w)
-    # in live mode a row with no asks cannot be bet -> drop its edge
-    if live:
-        for r in rows:
-            if r["price_src"] == "no asks": r["edge_pts"] = r["ev_per_dollar"] = None
+    for r in rows: finalize(r, live)
     rows.sort(key=lambda r: (r["edge_pts"] is None, -(r["fair_prob"] or 0)))
     ev_ids = {r["event"] for r in rows if r["fair_prob"] is not None}
     stats = dict(errors=errors, mode=mode, events=len(events), markets_scanned=n_markets, rows=len(rows),

@@ -134,8 +134,13 @@ To restrict who can use it: Server Settings → Integrations → Luck Society Li
   `/matchups/{id}/markets/straight` right before pricing; markets that are not `open` or past their `cutoffAt` are dropped. "danger zone" lines are flagged.
 - Live soccer handicaps are skipped (Pinnacle's in-running Asian handicap settles on the rest of the match, which doesn't map to Jupiter's spread).
 - Price = best ask from a fresh Jupiter order book for every priced live row (falls back to the listed price; rows with no asks get no edge).
-- **Age** column = how long ago the price was read; "Jup↔Pin lag" = seconds between the Jupiter price and the Pinnacle line.
-  Live edges disappear fast: re-scan and check the Age before you bet.
+- **Price self-check:** right before `results.json` is written, every row is re-priced from a fresh `/orderbook/{id}` *and* `/markets/{id}`
+  (the same `buyYesPriceUsd` / `buyNoPriceUsd` quote jup.ag's market page displays). Closed markets are dropped, rows whose ask moved ≥ 2¢
+  during the scan are flagged, a book/quote gap > 1¢ is flagged, and `price_ts`, `scan_price`, `price_move`, `ui_price` are stored.
+- **Live prices on the dashboard:** the page itself re-reads the Jupiter quote for the shown bets every 15 s (straight from
+  `prediction-market-api.jup.ag`, no token needed) and recomputes the edge, showing "live · ▲/▼ X¢ since scan". In live mode, win chances
+  older than 5 minutes are marked "old win chance" and are left out of Top picks. Scan again for fresh edges.
+- **Updated** column = how long ago the price was read.
 
 ## Math
 - p = Jupiter ask price; a contract pays $1.
