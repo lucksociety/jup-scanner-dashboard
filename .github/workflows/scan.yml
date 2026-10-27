@@ -10,7 +10,23 @@ on:
         options: [live, upcoming]
         default: live
       request_id:
-        description: "set by the dashboard so it can find this run"
+        description: "set by the dashboard / Discord bot so it can find this run"
+        type: string
+        default: ""
+      discord_app_id:
+        description: "set by the /livebets Worker (leave empty)"
+        type: string
+        default: ""
+      discord_token:
+        description: "set by the /livebets Worker (leave empty)"
+        type: string
+        default: ""
+      discord_count:
+        description: "number of picks to post to Discord"
+        type: string
+        default: "5"
+      discord_user:
+        description: "Discord user who ran /livebets"
         type: string
         default: ""
   # schedule:                 # uncomment for automatic scans (UTC cron; GitHub may delay runs a few minutes)
@@ -19,9 +35,8 @@ on:
 permissions:
   contents: write             # commit docs/data/results.json back to the repo
 
-concurrency:
-  group: scan
-  cancel-in-progress: false
+# No concurrency group on purpose: GitHub cancels a *pending* run when a third one queues, which would leave a
+# /livebets reply stuck on "thinking". Parallel runs are safe: the commit step rebases and retries.
 
 jobs:
   scan:
@@ -51,6 +66,20 @@ jobs:
           SCAN_MODE: ${{ inputs.mode || 'live' }}
           SCAN_REQUEST_ID: ${{ inputs.request_id }}
         run: python scanner/run_scan.py
+
+      - name: Post top bets to Discord (/livebets)
+        if: ${{ always() && inputs.discord_token != '' }}
+        continue-on-error: true   # never block publishing results to the dashboard
+        env:
+          DISCORD_APP_ID: ${{ inputs.discord_app_id }}
+          DISCORD_TOKEN: ${{ inputs.discord_token }}
+          DISCORD_RELAY_KEY: ${{ secrets.DISCORD_RELAY_KEY }}
+          DISCORD_COUNT: ${{ inputs.discord_count }}
+          DISCORD_USER: ${{ inputs.discord_user }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          DASHBOARD_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node scripts/post-discord.mjs
 
       - name: Commit results
         run: |

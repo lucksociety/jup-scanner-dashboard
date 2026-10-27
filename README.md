@@ -64,6 +64,70 @@ docs/data/results.json       latest results (seed data from a local test scan)
    - Note: in upcoming mode each scan commits a ~2.4 MB JSON file (live mode is ~30–100 KB) (~0.3 MB compressed), so frequent cron runs grow the git history over time.
    - Every 30–60 minutes is fine for months. To reset history, squash it occasionally.
 
+## Discord `/livebets` command (share the scanner without sharing your token)
+
+Anyone in your server types `/livebets`. A Discord message saying "thinking…" appears, the scan runs on GitHub (about 30–60 seconds), and the top bets are edited into that message as a Luck Society card. Your GitHub token stays in a Cloudflare secret, so nobody else ever sees it.
+
+```
+Discord ──/livebets──▶ Cloudflare Worker (free) ──workflow_dispatch──▶ GitHub Actions scan
+   ▲                     checks Discord signature                         │
+   └──────────── top 5 bets edited into the reply ◀───────────────────────┘
+```
+
+Options: `/livebets mode:upcoming` (pre-game instead of live) and `/livebets count:3` (1–10 picks, default 5).
+Cooldown: if a scan of the same mode finished in the last 60 s, that result is reused instead of starting a new one. If one is already running, the user is asked to wait (only they see that message).
+
+### Values you need and where each one goes
+
+| Value | Where you get it | Where it goes |
+|---|---|---|
+| Application ID | Discord Developer Portal → your app → General Information | Only for the register command and the invite link (step 5–6) |
+| Public Key | Same page | Worker secret `DISCORD_PUBLIC_KEY` |
+| Bot token | Developer Portal → Bot → Reset Token | Only for the one-time register command (step 5). Do not store it anywhere |
+| GitHub token | The same classic token (`public_repo` scope) you use on the dashboard, or a new one | Worker secret `GITHUB_TOKEN` |
+| Relay key | You generate it: `openssl rand -hex 32` | Worker secret `RELAY_KEY` **and** GitHub repo secret `DISCORD_RELAY_KEY` (same value) |
+| Worker URL | Printed by `npx wrangler deploy` (`https://luck-society-livebets.<you>.workers.dev`) | Developer Portal → General Information → Interactions Endpoint URL |
+| Server (guild) ID, optional | Discord: Settings → Advanced → Developer Mode on, then right-click your server → Copy Server ID | Register command (makes `/livebets` appear instantly in that server) |
+
+Why the relay key: on a public repo, the inputs of each Actions run are visible. Discord gives each `/livebets` a reply token that is valid for 15 minutes, so the Worker encrypts it before passing it to the workflow. The workflow decrypts it with the same key. It works without the key, but then someone reading the Actions page could edit that one reply during those 15 minutes.
+
+### Setup steps
+
+1. **Create the Discord app.** Go to <https://discord.com/developers/applications> → **New Application** → name it "Luck Society Live Edge Scanner" (and upload the logo if you like). On **General Information**, copy the **Application ID** and **Public Key**. On the **Bot** tab, click **Reset Token** and copy the bot token (needed once, in step 5).
+2. **Create a free Cloudflare account** at <https://dash.cloudflare.com/sign-up>. Then deploy the Worker from this repo (requires Node 18+):
+   ```bash
+   cd worker
+   npm install
+   npx wrangler login                      # opens the browser, then click Allow
+   npx wrangler secret put DISCORD_PUBLIC_KEY   # paste the Public Key
+   npx wrangler secret put GITHUB_TOKEN         # paste your classic public_repo token
+   openssl rand -hex 32                         # copy the output: this is your relay key
+   npx wrangler secret put RELAY_KEY            # paste the relay key
+   npx wrangler deploy                          # prints https://luck-society-livebets.<you>.workers.dev
+   ```
+   (The first `secret put` may ask to create the Worker: answer yes.)
+3. **Add the relay key to GitHub.** Repo → Settings → Secrets and variables → Actions → **New repository secret**. Name: `DISCORD_RELAY_KEY`. Value: the same relay key.
+4. **Point Discord at the Worker.** Developer Portal → General Information → **Interactions Endpoint URL** = your workers.dev URL → **Save Changes**. Discord pings the Worker right away. If the save is rejected, the Public Key secret is wrong.
+5. **Register the command** (from the repo root):
+   ```bash
+   DISCORD_APP_ID=<Application ID> DISCORD_BOT_TOKEN=<bot token> DISCORD_GUILD_ID=<server ID> node scripts/register-commands.js
+   ```
+   With `DISCORD_GUILD_ID`, the command appears in that server immediately. Without it, the command is global (all servers the app is in), which can take up to an hour.
+6. **Add the app to your server.** Open this link (replace the ID) and choose your server:
+   `https://discord.com/oauth2/authorize?client_id=<Application ID>&scope=applications.commands`
+   (Add `%20bot` after `applications.commands` if you also want a bot user to appear in the member list. It's not required.)
+7. Type **`/livebets`** in any channel.
+
+To restrict who can use it: Server Settings → Integrations → Luck Society Live Edge Scanner → choose the roles/channels.
+
+### Notes and limits
+- **Costs:** Cloudflare Workers' free plan (100k requests/day) and GitHub Actions on a public repo are both free.
+- **Speed:** each new scan takes about 30–60 s. Discord allows edits to a reply for 15 minutes, so a queued run still lands in time.
+- **Sharing scans:** the Worker and the dashboard share scans. A `/livebets` run also updates the dashboard, and a dashboard scan finished in the last 60 s is reused by `/livebets`.
+- **Changing the token:** run `npx wrangler secret put GITHUB_TOKEN` again. Changing anything else in `worker/` requires `npx wrangler deploy` again.
+- **Troubleshooting:** for "⚠️ Couldn't start the scan", the GitHub token is invalid or expired. For "⚠️ The scan failed", open the linked run in the Actions tab. If nothing is posted, check the run's "Post top bets to Discord" step, and `npx wrangler tail` for Worker logs.
+- **Tests:** `cd worker && node test/test.mjs` (signature checks, reply flow, cooldown, and the embed rendered from the current `results.json`).
+
 ## Live mode details
 - Jupiter: `/events?filter=live`, then only `isLive` events that started < 12 h ago (cricket < 5 days) and whose `/events/scores` entry is not ended. Score, period and clock are shown per row.
 - Pinnacle: only the live child matchups (`isLive`, status `started`, period 0 open); tennis uses the "Sets" line. Each matched game is re-fetched with

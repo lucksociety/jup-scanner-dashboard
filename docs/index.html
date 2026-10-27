@@ -192,10 +192,10 @@ async function scan(){const c=repoCfg();
    try{const jb=await(await gh(`${base}/runs/${run.id}/jobs?t=${Date.now()}`)).json();const ss=jb.jobs?.[0]?.steps||[],s=ss.find(s=>s.status==='in_progress');if(s)step=STEP[s.name]||s.name;else if(ss.some(s=>s.status==='completed'))step='Finishing up'}catch(e){}
    prog(`<span class="spin"></span><span>Scanning ${mode==='live'?'live games':'upcoming games'}: <b>${esc(step)}</b></span><span class="t">${el()}</span><a href="${run.html_url}" target="_blank" rel="noopener">details</a>`)}
   if(run.conclusion!=='success')throw new Error(`The scan ${run.conclusion==='cancelled'?'was cancelled':'failed'}. <a href="${run.html_url}" target="_blank" rel="noopener">See details</a>`);
-  prog(`<span class="spin"></span>Scan finished, loading results… <span class="t">${el()}</span>`);
+  prog(`<span class="spin"></span>Scan finished, loading results… <span class="t">${el()}</span>`);let ok=false;
   for(let i=0;i<10;i++){const x=await fetchResults();
-   if(x.d.request_id===rid){data=x.d;data._src=x.src;break}await sleep(3000)}
-  if(!data||data.request_id!==rid)throw new Error('The scan finished but its results could not be found. Press Reload.');
+   if(x.d.request_id===rid||(x.d.scanned_at_unix||0)*1000>=t0){data=x.d;data._src=x.src;ok=true;break}await sleep(3000)}
+  if(!ok)throw new Error('The scan finished but its results could not be found. Press Reload.');
   showStatus();render();prog(`✓ Fresh ${mode==='live'?'live':'upcoming'} results, ready in ${el()}.`,'done');setTimeout(()=>{if(!scanning)prog('')},15000)
  }catch(e){prog('✗ '+(e.message.includes('<a ')?e.message:esc(e.message)),'err')}
  finally{scanning=false;scanBtn(false)}}
