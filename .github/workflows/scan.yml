@@ -1,0 +1,50 @@
+name: scan
+
+on:
+  workflow_dispatch:          # "Run workflow" button on the Actions page = Scan
+  # schedule:                 # uncomment for automatic scans (UTC cron; GitHub may delay runs a few minutes)
+  #   - cron: "*/30 * * * *"  # every 30 minutes
+
+permissions:
+  contents: write             # commit docs/data/results.json back to the repo
+
+concurrency:
+  group: scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Connectivity check (logs whether runner IP is blocked)
+        continue-on-error: true
+        run: |
+          echo "Runner public IP / location:"; curl -s -m 10 https://ipinfo.io/json || true
+          for u in "https://prediction-market-api.jup.ag/api/v1/events?category=sports&start=0&end=1" \
+                   "https://api.jup.ag/prediction/v1/trading-status"; do
+            echo "$(curl -s -o /dev/null -m 20 -w '%{http_code}' "$u")  $u"; done
+          echo "$(curl -s -o /dev/null -m 20 -w '%{http_code}' -H 'X-API-Key: CmX2KcMrXuFmNg6YFbmTxE0y9CIrOi0R' \
+            https://guest.api.arcadia.pinnacle.com/0.1/sports/4/matchups)  pinnacle guest API"
+
+      - name: Run scanner
+        env:
+          JUP_API_KEY: ${{ secrets.JUP_API_KEY }}   # optional; leave the secret unset if you don't have one
+          SCAN_DAYS: "14"
+        run: python scanner/run_scan.py
+
+      - name: Commit results
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/data/results.json
+          if git diff --cached --quiet; then echo "no changes"; exit 0; fi
+          git commit -m "scan: $(date -u +'%Y-%m-%d %H:%M UTC')"
+          for i in 1 2 3; do git pull --rebase -X theirs && git push && exit 0; sleep 5; done
+          echo "push failed after 3 attempts"; exit 1

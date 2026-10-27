@@ -1,0 +1,94 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Jupiter Sports Edge Scanner</title>
+<style>
+:root{--bg:#0b0f14;--panel:#121821;--line:#1f2933;--txt:#e6edf3;--mut:#8b98a5;--pos:#3fb950;--neg:#f85149;--warn:#d29922;--acc:#58a6ff}
+*{box-sizing:border-box}body{font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;margin:0;background:var(--bg);color:var(--txt)}
+header{padding:18px 22px;background:linear-gradient(180deg,#141c27,#10161e);border-bottom:1px solid var(--line);display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+h1{font-size:18px;margin:0;letter-spacing:.2px}h1 small{color:var(--mut);font-weight:400;font-size:13px;margin-left:8px}
+.btn{background:#238636;color:#fff;border-radius:8px;padding:9px 18px;font-weight:600;text-decoration:none;font-size:14px}
+.btn.sec{background:#21262d;border:1px solid #30363d}
+.status{padding:10px 22px;font-size:13px;color:var(--mut);display:flex;gap:18px;flex-wrap:wrap;border-bottom:1px solid var(--line)}
+.status b{color:var(--txt)}.pill{padding:2px 8px;border-radius:99px;font-size:12px;font-weight:600}
+.ok{background:#12351f;color:var(--pos)}.partial{background:#3a2c0a;color:var(--warn)}.error{background:#3d1214;color:var(--neg)}
+.errors{margin:10px 22px;padding:10px 14px;border:1px solid #5a1d1d;background:#1f1012;border-radius:8px;font-size:13px;color:#ffb4ae;display:none}
+.errors.partial{border-color:#5a4410;background:#1d170a;color:#f2cc60}
+.filters{padding:12px 22px;display:flex;gap:16px;flex-wrap:wrap;align-items:center;font-size:13px;color:var(--mut)}
+input,select{background:var(--panel);color:var(--txt);border:1px solid #30363d;border-radius:6px;padding:5px 7px;width:76px}
+input[type=search]{width:220px}input[type=checkbox]{width:auto}
+.wrap{padding:0 14px 40px;overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:7px 9px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{position:sticky;top:0;background:var(--panel);cursor:pointer;user-select:none;color:#c9d1d9;font-weight:600}
+th.s::after{content:" ▾"}th.s.asc::after{content:" ▴"}tr:hover td{background:#111923}
+td.n{text-align:right;font-variant-numeric:tabular-nums}.pos{color:var(--pos)}.neg{color:var(--neg)}
+.sub{color:var(--mut);font-size:11.5px}.w{color:var(--warn);font-size:12px;white-space:normal;max-width:220px}
+a{color:var(--acc)}.live{color:#ff7b72;font-weight:700}footer{color:var(--mut);font-size:12px;padding:0 22px 30px}
+</style><script src="config.js"></script></head><body>
+<header><h1>Jupiter Prediction · Sports + Esports Edge Scanner<small>fair odds = de-vigged Pinnacle · fees included</small></h1>
+<a id="scanNow" class="btn" target="_blank" href="#">▶ Scan now</a>
+<a class="btn sec" href="#" id="reload">↻ Reload results</a></header>
+<div class="status" id="status">Loading results…</div>
+<div class="errors" id="errors"></div>
+<div class="filters">
+<label>Min edge (pts) <input id="minEdge" type="number" step="0.5" value="0"></label>
+<label>Min fair prob % <input id="minProb" type="number" step="5" value="0"></label>
+<label>Min $ at +EV <input id="minDepth" type="number" step="10" value="5"></label>
+<label>Closes within (days) <input id="days" type="number" value="14"></label>
+<label>Type <select id="mtype" style="width:auto"><option value="">all</option><option>moneyline</option><option>spreads</option><option>totals</option></select></label>
+<label>Category <select id="cat" style="width:auto"><option value="">all</option><option>sports</option><option>esports</option></select></label>
+<label>Show <select id="show" style="width:auto"><option value="ev">edge ≥ min only</option><option value="all">all priced</option></select></label>
+<label><input id="hideWarn" type="checkbox"> hide &gt;10pt edges</label>
+<label><input id="hideLive" type="checkbox"> hide in-play</label>
+<input id="q" type="search" placeholder="search team / league…">
+<span id="shown"></span></div>
+<div class="wrap"><table><thead><tr>
+<th data-k="event">Event</th><th data-k="market_type">Type</th><th data-k="selection">Bet</th><th data-k="price">Price</th>
+<th data-k="implied_prob">Implied</th><th data-k="fair_prob" class="s">Fair prob</th><th data-k="edge_pts">Edge (pts)</th>
+<th data-k="ev_per_dollar">EV / $1</th><th data-k="depth_ok">$ at +EV</th><th data-k="depth_best">$ best ask</th>
+<th data-k="close_ts">Closes (ET)</th><th>Fair source</th><th>Notes</th><th></th></tr></thead><tbody id="tb"></tbody></table></div>
+<footer>Edge = fair prob − (price + fee), fee ≈ 0.07·p·(1−p) per contract. EV/$1 = fair ÷ (price+fee) − 1. Bets without a matching Pinnacle line are counted as “no edge data” and never shown with an invented probability. Edges under ~1 pt are within de-vig model error. Not financial advice; verify market rules (OT, extra time, retirements) before betting.</footer>
+<script>
+const $=id=>document.getElementById(id);
+let data=null,sortK='fair_prob',sortDir=-1;
+(function(){const c=window.SCANNER_CONFIG||{};let o=c.owner,r=c.repo;
+ const m=location.hostname.match(/^([^.]+)\.github\.io$/);if(!o&&m)o=m[1];
+ if(!r&&m){r=location.pathname.split('/').filter(Boolean)[0]||(o+'.github.io')}
+ const wf=c.workflow||'scan.yml';
+ $('scanNow').href=o&&r?`https://github.com/${o}/${r}/actions/workflows/${wf}`:'https://github.com';
+ $('scanNow').title='Opens the workflow page: click "Run workflow". Results appear here ~2–3 min later.';})();
+const pct=x=>x==null?'':(x*100).toFixed(1)+'%',money=x=>x==null?'—':'$'+Math.round(x).toLocaleString();
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function ago(u){if(!u)return'';const m=Math.round((Date.now()/1000-u)/60);return m<1?'just now':m<60?m+' min ago':Math.round(m/6)/10+' h ago'}
+async function load(){try{const r=await fetch('data/results.json?t='+Date.now(),{cache:'no-store'});
+ if(!r.ok)throw new Error('results.json HTTP '+r.status+' (has the workflow run yet?)');data=await r.json();}catch(e){data=null;
+ $('status').innerHTML='<span class="pill error">NO DATA</span> '+esc(e.message);return}
+ const c=data.counts||{},st=data.status||'ok';
+ $('status').innerHTML=`<span class="pill ${st}">${st.toUpperCase()}${data.stale?' · STALE':''}</span>
+ <span>Last scan: <b>${esc(data.scanned_at)}</b> (${ago(data.scanned_at_unix)})</span>
+ ${data.stale?`<span>Last successful scan: <b>${esc(data.last_success||'never')}</b></span>`:''}
+ <span><b>${(c.events||0).toLocaleString()}</b> events</span><span><b>${(c.markets_scanned||0).toLocaleString()}</b> open markets</span>
+ <span><b>${(c.with_fair||0).toLocaleString()}</b> bets with fair odds</span><span><b class="pos">${c.positive_ev||0}</b> with edge ≥ 0</span>
+ <span><b>${(c.no_edge_data||0).toLocaleString()}</b> no edge data</span><span>${data.seconds||''}s on ${esc((data.runner||{}).runner||'')}</span>`;
+ const errs=(data.errors||[]).filter(Boolean);
+ $('errors').className='errors '+(st==='partial'?'partial':'');$('errors').style.display=errs.length?'block':'none';
+ $('errors').innerHTML=(st==='error'?'<b>Scan failed.</b> Showing previous results (if any). ':'<b>Warnings:</b> ')+errs.map(esc).join('<br>');
+ render()}
+function render(){if(!data)return;const me=+$('minEdge').value/100,mp=+$('minProb').value/100,md=+$('minDepth').value,
+ all=$('show').value==='all',hw=$('hideWarn').checked,hl=$('hideLive').checked,mt=$('mtype').value,cat=$('cat').value,
+ q=$('q').value.trim().toLowerCase(),dd=+$('days').value,lim=dd?Date.now()/1000+dd*86400:Infinity;
+ let rows=(data.rows||[]).filter(r=>(all||r.edge_pts>=me)&&r.fair_prob>=mp&&(all||r.depth_ok==null||r.depth_ok>=md)
+  &&!(hw&&r.edge_pts>0.10)&&!(hl&&r.in_play)&&(!mt||r.market_type===mt)&&(!cat||r.category===cat)
+  &&(!r.close_ts||r.close_ts<=lim)&&(!q||(r.event+' '+r.selection+' '+r.league).toLowerCase().includes(q)));
+ rows.sort((a,b)=>{let x=a[sortK],y=b[sortK];if(x==null)return 1;if(y==null)return -1;return(x>y?1:x<y?-1:0)*sortDir});
+ $('shown').textContent=rows.length+' shown';
+ $('tb').innerHTML=rows.slice(0,600).map(r=>`<tr><td>${esc(r.event)}<div class="sub">${esc(r.league)}${r.in_play?' · <span class="live">LIVE</span>':''}</div></td>
+ <td>${esc(r.market_type)}</td><td><b>${esc(r.selection)}</b></td><td class="n">$${r.price.toFixed(3)}</td><td class="n">${pct(r.implied_prob)}</td>
+ <td class="n"><b>${pct(r.fair_prob)}</b></td><td class="n ${r.edge_pts>=0?'pos':'neg'}">${(r.edge_pts*100).toFixed(1)}</td>
+ <td class="n ${r.ev_per_dollar>=0?'pos':'neg'}">${pct(r.ev_per_dollar)}</td><td class="n">${money(r.depth_ok)}</td><td class="n">${money(r.depth_best)}</td>
+ <td>${esc(r.closes)}</td><td>${esc(r.fair_source)}<div class="sub">${esc(r.pin_match)}</div></td><td class="w">${esc(r.warn)}</td>
+ <td><a href="${esc(r.link)}" target="_blank" rel="noopener">open ↗</a></td></tr>`).join('')}
+document.querySelectorAll('th[data-k]').forEach(th=>th.onclick=()=>{const k=th.dataset.k;sortDir=sortK===k?-sortDir:-1;sortK=k;
+ document.querySelectorAll('th').forEach(t=>t.classList.remove('s','asc'));th.classList.add('s');if(sortDir>0)th.classList.add('asc');render()});
+['minEdge','minProb','minDepth','days','mtype','cat','show','hideWarn','hideLive','q'].forEach(id=>$(id).addEventListener('input',render));
+$('reload').onclick=e=>{e.preventDefault();load()};
+load();setInterval(load,120000);
+</script></body></html>
