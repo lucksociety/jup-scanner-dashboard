@@ -1,4 +1,6 @@
-# Jupiter Prediction · Sports + Esports Edge Scanner (GitHub dashboard)
+# 🍀 Luck Society Live Edge Scanner
+
+A GitHub Pages dashboard for Jupiter prediction markets (sports + esports), branded for [@LuckSociety](https://x.com/lucksociety).
 
 This dashboard runs on GitHub Pages. By default it scans **live (in-progress) sports and esports games** on Jupiter's prediction market
 (switch the dropdown to "Upcoming" for pre-match markets).
@@ -16,7 +18,8 @@ Results are ranked by win probability. By default you only see bets with edge �
 .github/workflows/scan.yml   manual "Run workflow" (+ optional cron) -> runs scanner, commits docs/data/results.json
 scanner/scanner.py           fetch Jupiter + Pinnacle, match games, compute fair prob / edge / EV / depth
 scanner/run_scan.py          wraps a scan, writes results.json (status ok | partial | error, keeps last good rows if a scan fails)
-docs/index.html              the dashboard (static, no build step)
+docs/index.html, style.css   the dashboard (static, no build step)
+docs/assets/                 Luck Society logo, favicon, banner
 docs/config.js               optional owner/repo/branch override (never put a token here)
 docs/data/results.json       latest results (seed data from a local test scan)
 ```
@@ -45,12 +48,11 @@ docs/data/results.json       latest results (seed data from a local test scan)
    - The scan works without a key.
    - The key is only used as a fallback to the official `api.jup.ag` host if the primary feed fails.
 6. **Create a token for the Scan button (one time).**
-   - Go to https://github.com/settings/personal-access-tokens/new (Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → Generate new token).
-   - Name: `jup-scanner`; Expiration: your choice (e.g. 90 days).
-   - Repository access: **Only select repositories** → pick this repo.
-   - Repository permissions: **Actions → Read and write** (start + watch the scan) and **Contents → Read-only** (read fresh results). Nothing else.
-   - Generate, copy the `github_pat_…` value.
-   - On the dashboard click **⚙ Settings**, paste it, check owner/repo (auto-detected from the github.io URL), click **Save**. It shows "✓ token works".
+   - **Recommended: classic token.** Open https://github.com/settings/tokens/new (Settings → Developer settings → Personal access tokens → Tokens (classic)).
+     Note: `Luck Society Scanner`, pick an expiration, tick only **`public_repo`**, click Generate, and copy the `ghp_…` value.
+   - Alternative: fine-grained token at https://github.com/settings/personal-access-tokens/new. Choose **Only select repositories** → this repo, then
+     **Actions: Read and write** and **Contents: Read-only**.
+   - On the dashboard click **⚙**, paste the token, check owner/repo (auto-detected from the github.io URL), click **Save & test**. It should say "Connected".
    - The token is stored only in that browser's `localStorage`. It is never committed or sent anywhere except api.github.com.
      Anyone using that browser profile could use it, so revoke it on GitHub if the device is shared or lost. **Forget token** removes it.
 7. **Run a scan.** Pick **Live games** (default) or **Upcoming**, click **▶ Scan**.
