@@ -21,18 +21,37 @@ th{position:sticky;top:0;background:var(--panel);cursor:pointer;user-select:none
 th.s::after{content:" ▾"}th.s.asc::after{content:" ▴"}tr:hover td{background:#111923}
 td.n{text-align:right;font-variant-numeric:tabular-nums}.pos{color:var(--pos)}.neg{color:var(--neg)}
 .sub{color:var(--mut);font-size:11.5px}.w{color:var(--warn);font-size:12px;white-space:normal;max-width:220px}
+button.btn{border:0;cursor:pointer;font-family:inherit}button.btn:disabled{opacity:.55;cursor:wait}
+.progress{margin:10px 22px;padding:10px 14px;border:1px solid #1f4a7a;background:#0d1a2a;border-radius:8px;font-size:13px;display:none}
+.progress.err{border-color:#5a1d1d;background:#1f1012;color:#ffb4ae}.progress.done{border-color:#1d4a2a;background:#0d1f14;color:#9be9a8}
+.spin{display:inline-block;width:11px;height:11px;border:2px solid #58a6ff55;border-top-color:#58a6ff;border-radius:50%;animation:sp 1s linear infinite;margin-right:8px;vertical-align:-1px}
+@keyframes sp{to{transform:rotate(360deg)}}
+.settings{margin:10px 22px;padding:12px 14px;border:1px solid #30363d;background:var(--panel);border-radius:8px;font-size:13px;display:none;line-height:1.6}
+.settings input{width:340px}.settings input.sm{width:150px}.empty{padding:40px 22px;text-align:center;color:var(--mut);font-size:15px}
+.empty b{display:block;font-size:20px;color:var(--txt);margin-bottom:6px}.fresh{color:var(--pos)}.old{color:var(--warn)}.vold{color:var(--neg)}
 a{color:var(--acc)}.live{color:#ff7b72;font-weight:700}footer{color:var(--mut);font-size:12px;padding:0 22px 30px}
 </style><script src="config.js"></script></head><body>
 <header><h1>Jupiter Prediction · Sports + Esports Edge Scanner<small>fair odds = de-vigged Pinnacle · fees included</small></h1>
-<a id="scanNow" class="btn" target="_blank" href="#">▶ Scan now</a>
-<a class="btn sec" href="#" id="reload">↻ Reload results</a></header>
+<select id="mode" style="width:auto" title="live = in-progress games only"><option value="live">Live games</option><option value="upcoming">Upcoming (pre-match)</option></select>
+<button id="scanNow" class="btn">▶ Scan</button>
+<button class="btn sec" id="reload">↻ Reload</button>
+<button class="btn sec" id="gear" title="GitHub token for the Scan button">⚙ Settings</button></header>
+<div class="settings" id="settings">
+<b>Scan button setup</b> (one time, stored only in this browser's localStorage, never committed)<br>
+GitHub fine-grained token: <input id="tok" type="password" placeholder="github_pat_…" autocomplete="off">
+Repo: <input id="own" class="sm" placeholder="owner"> / <input id="rep" class="sm" placeholder="repo"> branch <input id="br" class="sm" style="width:80px" placeholder="main">
+<button class="btn" id="saveTok">Save</button> <button class="btn sec" id="clrTok">Forget token</button> <span id="tokMsg"></span><br>
+<span class="sub">Create it at <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">github.com/settings/personal-access-tokens/new</a> →
+Repository access: <i>Only select repositories</i> → this repo → Permissions: <b>Actions: Read and write</b>, <b>Contents: Read-only</b>. Anyone who can use this browser profile can use the token; revoke it on GitHub any time.</span>
+</div>
+<div class="progress" id="progress"></div>
 <div class="status" id="status">Loading results…</div>
 <div class="errors" id="errors"></div>
 <div class="filters">
 <label>Min edge (pts) <input id="minEdge" type="number" step="0.5" value="0"></label>
 <label>Min fair prob % <input id="minProb" type="number" step="5" value="0"></label>
 <label>Min $ at +EV <input id="minDepth" type="number" step="10" value="5"></label>
-<label>Closes within (days) <input id="days" type="number" value="14"></label>
+<label id="daysL">Closes within (days) <input id="days" type="number" value="14"></label>
 <label>Type <select id="mtype" style="width:auto"><option value="">all</option><option>moneyline</option><option>spreads</option><option>totals</option></select></label>
 <label>Category <select id="cat" style="width:auto"><option value="">all</option><option>sports</option><option>esports</option></select></label>
 <label>Show <select id="show" style="width:auto"><option value="ev">edge ≥ min only</option><option value="all">all priced</option></select></label>
@@ -41,54 +60,107 @@ a{color:var(--acc)}.live{color:#ff7b72;font-weight:700}footer{color:var(--mut);f
 <input id="q" type="search" placeholder="search team / league…">
 <span id="shown"></span></div>
 <div class="wrap"><table><thead><tr>
-<th data-k="event">Event</th><th data-k="market_type">Type</th><th data-k="selection">Bet</th><th data-k="price">Price</th>
+<th data-k="event">Event</th><th data-k="score">Score</th><th data-k="market_type">Type</th><th data-k="selection">Bet</th><th data-k="price">Price</th>
 <th data-k="implied_prob">Implied</th><th data-k="fair_prob" class="s">Fair prob</th><th data-k="edge_pts">Edge (pts)</th>
 <th data-k="ev_per_dollar">EV / $1</th><th data-k="depth_ok">$ at +EV</th><th data-k="depth_best">$ best ask</th>
-<th data-k="close_ts">Closes (ET)</th><th>Fair source</th><th>Notes</th><th></th></tr></thead><tbody id="tb"></tbody></table></div>
-<footer>Edge = fair prob − (price + fee), fee ≈ 0.07·p·(1−p) per contract. EV/$1 = fair ÷ (price+fee) − 1. Bets without a matching Pinnacle line are counted as “no edge data” and never shown with an invented probability. Edges under ~1 pt are within de-vig model error. Not financial advice; verify market rules (OT, extra time, retirements) before betting.</footer>
+<th data-k="price_ts">Age</th><th data-k="close_ts">Starts / closes (ET)</th><th>Fair source</th><th>Notes</th><th></th></tr></thead><tbody id="tb"></tbody></table><div class="empty" id="empty" style="display:none"></div></div>
+<footer>Edge = fair prob − (price + fee), fee ≈ 0.07·p·(1−p) per contract. EV/$1 = fair ÷ (price+fee) − 1. Bets without a matching Pinnacle line are counted as “no edge data” and never shown with an invented probability. Edges under ~1 pt are within de-vig model error. Live prices move fast: an edge can vanish between the scan and your click, so check the Age column and re-scan before betting. Not financial advice; verify market rules (OT, extra time, retirements) before betting.</footer>
 <script>
 const $=id=>document.getElementById(id);
-let data=null,sortK='fair_prob',sortDir=-1;
-(function(){const c=window.SCANNER_CONFIG||{};let o=c.owner,r=c.repo;
+let data=null,sortK='fair_prob',sortDir=-1,scanning=false;
+const LS={get:k=>localStorage.getItem('jupscan.'+k)||'',set:(k,v)=>v?localStorage.setItem('jupscan.'+k,v):localStorage.removeItem('jupscan.'+k)};
+function repoCfg(){const c=window.SCANNER_CONFIG||{};let o=LS.get('owner')||c.owner,r=LS.get('repo')||c.repo;
  const m=location.hostname.match(/^([^.]+)\.github\.io$/);if(!o&&m)o=m[1];
- if(!r&&m){r=location.pathname.split('/').filter(Boolean)[0]||(o+'.github.io')}
- const wf=c.workflow||'scan.yml';
- $('scanNow').href=o&&r?`https://github.com/${o}/${r}/actions/workflows/${wf}`:'https://github.com';
- $('scanNow').title='Opens the workflow page: click "Run workflow". Results appear here ~2–3 min later.';})();
+ if(!r&&m)r=location.pathname.split('/').filter(Boolean)[0]||(o+'.github.io');
+ return{owner:o||'',repo:r||'',branch:LS.get('branch')||c.branch||'main',wf:c.workflow||'scan.yml',token:LS.get('token')}}
 const pct=x=>x==null?'':(x*100).toFixed(1)+'%',money=x=>x==null?'—':'$'+Math.round(x).toLocaleString();
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-function ago(u){if(!u)return'';const m=Math.round((Date.now()/1000-u)/60);return m<1?'just now':m<60?m+' min ago':Math.round(m/6)/10+' h ago'}
-async function load(){try{const r=await fetch('data/results.json?t='+Date.now(),{cache:'no-store'});
- if(!r.ok)throw new Error('results.json HTTP '+r.status+' (has the workflow run yet?)');data=await r.json();}catch(e){data=null;
+function ago(u){if(!u)return'';const s=Math.max(0,Math.round(Date.now()/1000-u));return s<60?s+'s ago':s<3600?Math.round(s/60)+' min ago':Math.round(s/360)/10+' h ago'}
+function ageCls(u){const s=Date.now()/1000-u;return s<120?'fresh':s<600?'old':'vold'}
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function gh(path,opt={}){const c=repoCfg();const r=await fetch('https://api.github.com'+path,{cache:'no-store',...opt,
+  headers:{'Accept':'application/vnd.github+json','Authorization':'Bearer '+c.token,'X-GitHub-Api-Version':'2022-11-28',...(opt.headers||{})}});
+ if(!r.ok){let m='';try{m=(await r.json()).message}catch(e){}
+  throw new Error(`GitHub API ${r.status}${m?': '+m:''}`+(r.status===401?' (token invalid/expired: update it in ⚙ Settings)':r.status===403||r.status===404?' (token needs Actions: Read and write + Contents: Read on this repo)':''))}
+ return r.status===204?null:r}
+// results: via contents API when a token is set (fresh immediately, no Pages deploy wait); else the Pages copy
+async function fetchResults(){const c=repoCfg();
+ if(c.token&&c.owner&&c.repo){const r=await gh(`/repos/${c.owner}/${c.repo}/contents/docs/data/results.json?ref=${encodeURIComponent(c.branch)}&t=${Date.now()}`,
+   {headers:{'Accept':'application/vnd.github.raw+json'}});return{d:await r.json(),src:'GitHub API (latest commit)'}}
+ const r=await fetch('data/results.json?t='+Date.now(),{cache:'no-store'});
+ if(!r.ok)throw new Error('results.json HTTP '+r.status+' (has the workflow run yet?)');return{d:await r.json(),src:'Pages copy'}}
+async function load(){try{const x=await fetchResults();data=x.d;data._src=x.src}catch(e){data=null;
  $('status').innerHTML='<span class="pill error">NO DATA</span> '+esc(e.message);return}
- const c=data.counts||{},st=data.status||'ok';
+ showStatus();render()}
+function showStatus(){const c=data.counts||{},st=data.status||'ok',live=(data.mode||'live')==='live';
  $('status').innerHTML=`<span class="pill ${st}">${st.toUpperCase()}${data.stale?' · STALE':''}</span>
- <span>Last scan: <b>${esc(data.scanned_at)}</b> (${ago(data.scanned_at_unix)})</span>
+ <span>Mode: <b>${live?'LIVE games':'upcoming'}</b></span>
+ <span>Last scan: <b>${esc(data.scanned_at)}</b> (<span class="${ageCls(data.scanned_at_unix)}">${ago(data.scanned_at_unix)}</span>)</span>
  ${data.stale?`<span>Last successful scan: <b>${esc(data.last_success||'never')}</b></span>`:''}
- <span><b>${(c.events||0).toLocaleString()}</b> events</span><span><b>${(c.markets_scanned||0).toLocaleString()}</b> open markets</span>
+ ${live?`<span><b class="live">${c.live_events??0}</b> live events</span><span><b>${(c.live_markets??0).toLocaleString()}</b> live markets</span>
+   <span><b>${c.events_with_fair??0}</b> live events with Pinnacle live odds</span>`
+  :`<span><b>${(c.events||0).toLocaleString()}</b> events</span><span><b>${(c.markets_scanned||0).toLocaleString()}</b> open markets</span>`}
  <span><b>${(c.with_fair||0).toLocaleString()}</b> bets with fair odds</span><span><b class="pos">${c.positive_ev||0}</b> with edge ≥ 0</span>
- <span><b>${(c.no_edge_data||0).toLocaleString()}</b> no edge data</span><span>${data.seconds||''}s on ${esc((data.runner||{}).runner||'')}</span>`;
+ <span><b>${(c.no_edge_data||0).toLocaleString()}</b> no edge data</span><span>${data.seconds||''}s · ${esc((data.runner||{}).runner||'')} · via ${esc(data._src||'')}</span>`;
  const errs=(data.errors||[]).filter(Boolean);
  $('errors').className='errors '+(st==='partial'?'partial':'');$('errors').style.display=errs.length?'block':'none';
  $('errors').innerHTML=(st==='error'?'<b>Scan failed.</b> Showing previous results (if any). ':'<b>Warnings:</b> ')+errs.map(esc).join('<br>');
- render()}
+ $('daysL').style.display=live?'none':''}
 function render(){if(!data)return;const me=+$('minEdge').value/100,mp=+$('minProb').value/100,md=+$('minDepth').value,
  all=$('show').value==='all',hw=$('hideWarn').checked,hl=$('hideLive').checked,mt=$('mtype').value,cat=$('cat').value,
- q=$('q').value.trim().toLowerCase(),dd=+$('days').value,lim=dd?Date.now()/1000+dd*86400:Infinity;
+ live=(data.mode||'live')==='live',q=$('q').value.trim().toLowerCase(),dd=+$('days').value,lim=dd&&!live?Date.now()/1000+dd*86400:Infinity;
  let rows=(data.rows||[]).filter(r=>(all||r.edge_pts>=me)&&r.fair_prob>=mp&&(all||r.depth_ok==null||r.depth_ok>=md)
   &&!(hw&&r.edge_pts>0.10)&&!(hl&&r.in_play)&&(!mt||r.market_type===mt)&&(!cat||r.category===cat)
   &&(!r.close_ts||r.close_ts<=lim)&&(!q||(r.event+' '+r.selection+' '+r.league).toLowerCase().includes(q)));
  rows.sort((a,b)=>{let x=a[sortK],y=b[sortK];if(x==null)return 1;if(y==null)return -1;return(x>y?1:x<y?-1:0)*sortDir});
- $('shown').textContent=rows.length+' shown';
+ $('shown').textContent=rows.length+' shown';const c=data.counts||{};
+ const em=$('empty');if(!rows.length){em.style.display='block';
+  em.innerHTML=live&&!(c.live_events)?'<b>No live games right now</b>Jupiter has no in-progress sports/esports events. Hit Scan again once games are underway.'
+   :live&&!(c.events_with_fair)?`<b>No live odds to compare</b>${c.live_events} live event(s) on Jupiter, but none had a matching, fresh Pinnacle live line (bets are “no edge data”).`
+   :'<b>No bets match the filters</b>Try “Show: all priced” or lower the minimums.'}else em.style.display='none';
  $('tb').innerHTML=rows.slice(0,600).map(r=>`<tr><td>${esc(r.event)}<div class="sub">${esc(r.league)}${r.in_play?' · <span class="live">LIVE</span>':''}</div></td>
- <td>${esc(r.market_type)}</td><td><b>${esc(r.selection)}</b></td><td class="n">$${r.price.toFixed(3)}</td><td class="n">${pct(r.implied_prob)}</td>
- <td class="n"><b>${pct(r.fair_prob)}</b></td><td class="n ${r.edge_pts>=0?'pos':'neg'}">${(r.edge_pts*100).toFixed(1)}</td>
+ <td>${esc(r.score||'')}<div class="sub">${esc([r.period,r.elapsed?r.elapsed+"'":''].filter(Boolean).join(' '))}</div></td>
+ <td>${esc(r.market_type)}</td><td><b>${esc(r.selection)}</b></td><td class="n">$${r.price.toFixed(3)}<div class="sub">${esc(r.price_src||'')}</div></td><td class="n">${pct(r.implied_prob)}</td>
+ <td class="n"><b>${pct(r.fair_prob)}</b></td><td class="n ${r.edge_pts>=0?'pos':'neg'}">${r.edge_pts==null?'—':(r.edge_pts*100).toFixed(1)}</td>
  <td class="n ${r.ev_per_dollar>=0?'pos':'neg'}">${pct(r.ev_per_dollar)}</td><td class="n">${money(r.depth_ok)}</td><td class="n">${money(r.depth_best)}</td>
- <td>${esc(r.closes)}</td><td>${esc(r.fair_source)}<div class="sub">${esc(r.pin_match)}</div></td><td class="w">${esc(r.warn)}</td>
+ <td class="${r.price_ts?ageCls(r.price_ts):''}" title="price ${r.price_ts?new Date(r.price_ts*1000).toLocaleTimeString('en-US',{timeZone:'America/New_York'})+' ET':''} · Pinnacle ${r.fair_ts?new Date(r.fair_ts*1000).toLocaleTimeString('en-US',{timeZone:'America/New_York'})+' ET':''}">${r.price_ts?ago(r.price_ts):''}<div class="sub">${r.lag_s!=null?'Jup↔Pin lag '+r.lag_s+'s':''}</div></td>
+ <td>${esc(live?r.starts:r.closes)}</td><td>${esc(r.fair_source)}<div class="sub">${esc(r.pin_match)}</div></td><td class="w">${esc(r.warn)}</td>
  <td><a href="${esc(r.link)}" target="_blank" rel="noopener">open ↗</a></td></tr>`).join('')}
+function prog(html,cls=''){const p=$('progress');p.style.display=html?'block':'none';p.className='progress '+cls;p.innerHTML=html}
+async function scan(){const c=repoCfg();
+ if(!c.token||!c.owner||!c.repo){openSettings('Paste a GitHub token first, then press Scan again.');return}
+ scanning=true;$('scanNow').disabled=true;const t0=Date.now(),mode=$('mode').value;
+ const rid=Date.now().toString(36)+Math.random().toString(36).slice(2,7),base=`/repos/${c.owner}/${c.repo}/actions`;
+ const el=()=>Math.round((Date.now()-t0)/1000)+'s';
+ try{prog('<span class="spin"></span>Starting scan…');
+  await gh(`${base}/workflows/${c.wf}/dispatches`,{method:'POST',body:JSON.stringify({ref:c.branch,inputs:{mode,request_id:rid}})});
+  let run=null;
+  for(let i=0;i<40&&!run;i++){await sleep(3000);prog(`<span class="spin"></span>Scan requested, waiting for GitHub to start it… ${el()}`);
+   const j=await(await gh(`${base}/workflows/${c.wf}/runs?event=workflow_dispatch&per_page=15&t=${Date.now()}`)).json();
+   run=(j.workflow_runs||[]).find(r=>(r.display_title||r.name||'').includes(rid))}
+  if(!run)throw new Error('GitHub accepted the scan but no run appeared within 2 min');
+  while(run.status!=='completed'){await sleep(4000);
+   run=await(await gh(`${base}/runs/${run.id}?t=${Date.now()}`)).json();let step='';
+   try{const jb=await(await gh(`${base}/runs/${run.id}/jobs?t=${Date.now()}`)).json();const s=(jb.jobs?.[0]?.steps||[]).find(s=>s.status==='in_progress');step=s?' · '+s.name:''}catch(e){}
+   prog(`<span class="spin"></span>Scanning ${mode==='live'?'live games':'upcoming games'}: <b>${esc(run.status)}</b>${esc(step)} · ${el()} · <a href="${run.html_url}" target="_blank" rel="noopener">log</a>`)}
+  if(run.conclusion!=='success')throw new Error(`scan run ${run.conclusion} (<a href="${run.html_url}" target="_blank" rel="noopener">see log</a>)`);
+  prog(`<span class="spin"></span>Scan finished, loading results… ${el()}`);
+  for(let i=0;i<10;i++){const x=await fetchResults();
+   if(x.d.request_id===rid){data=x.d;data._src=x.src;break}await sleep(3000)}
+  if(!data||data.request_id!==rid)throw new Error('run finished but its results.json was not found on '+c.branch);
+  showStatus();render();prog(`✓ Fresh ${mode} results loaded (${el()} total, scanned ${esc(data.scanned_at)}).`,'done');setTimeout(()=>{if(!scanning)prog('')},15000)
+ }catch(e){prog('✗ Scan failed: '+(e.message.includes('<a ')?e.message:esc(e.message)),'err')}
+ finally{scanning=false;$('scanNow').disabled=false}}
+function openSettings(msg){const c=repoCfg();$('settings').style.display='block';$('tok').value=c.token;$('own').value=c.owner;$('rep').value=c.repo;$('br').value=c.branch;$('tokMsg').textContent=msg||''}
+$('gear').onclick=()=>$('settings').style.display==='block'?$('settings').style.display='none':openSettings();
+$('saveTok').onclick=async()=>{LS.set('token',$('tok').value.trim());LS.set('owner',$('own').value.trim());LS.set('repo',$('rep').value.trim());LS.set('branch',$('br').value.trim());
+ const c=repoCfg();$('tokMsg').textContent='checking…';
+ try{await gh(`/repos/${c.owner}/${c.repo}/actions/workflows/${c.wf}`);$('tokMsg').innerHTML='<span class="pos">✓ token works for '+esc(c.owner+'/'+c.repo)+'</span>';load()}
+ catch(e){$('tokMsg').innerHTML='<span class="neg">'+esc(e.message)+'</span>'}};
+$('clrTok').onclick=()=>{LS.set('token','');$('tok').value='';$('tokMsg').textContent='token removed from this browser'};
 document.querySelectorAll('th[data-k]').forEach(th=>th.onclick=()=>{const k=th.dataset.k;sortDir=sortK===k?-sortDir:-1;sortK=k;
  document.querySelectorAll('th').forEach(t=>t.classList.remove('s','asc'));th.classList.add('s');if(sortDir>0)th.classList.add('asc');render()});
 ['minEdge','minProb','minDepth','days','mtype','cat','show','hideWarn','hideLive','q'].forEach(id=>$(id).addEventListener('input',render));
-$('reload').onclick=e=>{e.preventDefault();load()};
-load();setInterval(load,120000);
+$('reload').onclick=()=>load();$('scanNow').onclick=scan;
+load();setInterval(()=>{if(!scanning)load()},120000);setInterval(()=>{if(data&&!scanning){showStatus();render()}},20000);
 </script></body></html>

@@ -56,13 +56,17 @@ def jup_get(path, **params):
     if params: url += "?" + urllib.parse.urlencode(params)
     return http_json(url, {"x-api-key": JUP_KEY} if JUP_KEY else None)
 
-def fetch_jupiter_events(category, log=print):
+LIVE_MAX_AGE_H = {8: 24 * 5}   # cricket Tests run for days; everything else must have started < 12h ago
+DEFAULT_LIVE_MAX_AGE_H = 12
+
+def fetch_jupiter_events(category, log=print, live_only=False):
     out, start, page, wave = [], 0, 100, 6
+    extra = {"filter": "live"} if live_only else {}
     with ThreadPoolExecutor(wave) as ex:
         while True:
             starts = [start + i * page for i in range(wave)]
             res = list(ex.map(lambda s: jup_get("/events", category=category, includeMarkets="true",
-                                                 includeAllMarkets="true", start=s, end=s + page), starts))
+                                                 includeAllMarkets="true", start=s, end=s + page, **extra), starts))
             done = False
             for r in res:
                 out += r.get("data", [])
@@ -74,20 +78,39 @@ def fetch_jupiter_events(category, log=print):
     for e in out:
         if e["eventId"] not in seen:
             seen.add(e["eventId"]); uniq.append(e)
-    log(f"Jupiter {category}: {len(uniq)} events")
+    log(f"Jupiter {category}{' (live)' if live_only else ''}: {len(uniq)} events")
     return uniq
+
+def fetch_scores(event_ids):
+    """Jupiter live scoreboard: {eventId: {score, period, elapsed, status, live, ended, updatedAt}}"""
+    out = {}
+    ids = list(event_ids)
+    for i in range(0, len(ids), 20):
+        try:
+            d = jup_get("/events/scores", eventIds=",".join(ids[i:i + 20]))
+            for x in d.get("data", []): out[x["eventId"]] = x
+        except Exception:
+            pass
+    return out
 
 def fetch_orderbook(mid):
     try: return jup_get(f"/orderbook/{mid}")
     except Exception: return None
 
 # ---------------------------------------------------------------- Pinnacle
-def fetch_pinnacle(log=print, errors=None):
-    H = {"X-API-Key": PIN_KEY}
+UNIT_RANK = {"Regular": 0, None: 0, "Sets": 1, "Games": 2}
+MODE_RANK = {"live_delay": 0, "both": 1, None: 1, "danger_zone": 2}
+
+def pin_headers(): return {"X-API-Key": PIN_KEY}
+
+def fetch_pinnacle(log=print, errors=None, live=False):
+    """live=False: pre-match lines only (cutoff in the future, game not started).
+    live=True: in-play lines only, taken from Pinnacle's live child matchups. Pre-match prices of a
+    started game are never used."""
     def one(sid):
         try:
-            m = http_json(f"{PIN_BASE}/sports/{sid}/matchups", H)
-            k = http_json(f"{PIN_BASE}/sports/{sid}/markets/straight", H)
+            m = http_json(f"{PIN_BASE}/sports/{sid}/matchups", pin_headers())
+            k = [] if live else http_json(f"{PIN_BASE}/sports/{sid}/markets/straight", pin_headers())
             return sid, m, k
         except Exception as e:
             log(f"Pinnacle sport {sid} failed: {e}")
@@ -95,31 +118,55 @@ def fetch_pinnacle(log=print, errors=None):
             return sid, [], []
     with ThreadPoolExecutor(4) as ex:
         res = list(ex.map(one, PIN_SPORTS))
-    games = []   # one per real game; live child preferred
+    now = time.time()
+    games = []
     for sid, matchups, markets in res:
         mk = {}
         for x in markets:
             if x.get("status", "open") == "open":
                 mk.setdefault(x["matchupId"], []).append(x)
-        byid = {}
+        best = {}   # one entry per real game
         for m in matchups:
-            if m.get("type") != "matchup" or m.get("special") or m.get("units") not in (None, "Regular"):
+            if m.get("type") != "matchup" or m.get("special") or m.get("units") not in UNIT_RANK:
                 continue
+            if bool(m.get("isLive")) != live: continue
+            if live and m.get("status") != "started": continue
             ps = m.get("participants") or []
             home = next((p["name"] for p in ps if p.get("alignment") == "home"), None)
             away = next((p["name"] for p in ps if p.get("alignment") == "away"), None)
             if not home or not away: continue
-            byid[m["id"]] = dict(id=m["id"], parent=m.get("parentId"), sport=sid, league=m["league"]["name"],
-                                 home=home, away=away, start=m.get("startTime"), live=bool(m.get("isLive")),
-                                 markets=mk.get(m["id"], []))
-        # merge live child into parent slot
-        for g in list(byid.values()):
-            if g["parent"] and g["parent"] in byid and g["markets"]:
-                byid[g["parent"]]["markets"] = g["markets"]; byid[g["parent"]]["live"] = True
-                byid.pop(g["id"], None)
-        games += [g for g in byid.values() if g["markets"]]
-    log(f"Pinnacle: {len(games)} priced games")
+            p0 = next((p for p in m.get("periods") or [] if p.get("period") == 0), {})
+            if p0.get("status", "open") != "open": continue
+            sc = [((p.get("state") or {}).get("score")) for p in ps]
+            g = dict(id=m["id"], parent=m.get("parentId"), pin_score=sc if all(isinstance(x, int) for x in sc) else None, sport=sid, league=m["league"]["name"],
+                     home=home, away=away, start=m.get("startTime"), live=live, live_mode=m.get("liveMode"),
+                     clock=m.get("state") or {}, markets=[] if live else mk.get(m["id"], []), fetched=now)
+            if not live and g["start"]:
+                st = datetime.fromisoformat(g["start"].replace("Z", "+00:00")).timestamp()
+                if st <= now: continue          # started: pre-match price is stale
+            key = m.get("parentId") or m["id"]
+            rank = (UNIT_RANK[m.get("units")], MODE_RANK.get(m.get("liveMode"), 3))
+            if key not in best or rank < best[key][0]:
+                best[key] = (rank, g)
+        games += [g for _, g in best.values() if live or g["markets"]]
+    log(f"Pinnacle: {len(games)} {'live' if live else 'pre-match'} games")
     return games
+
+def refresh_pinnacle_markets(g):
+    """Fresh per-game fetch for a live matchup, dropping closed/suspended/expired lines."""
+    try:
+        ms = http_json(f"{PIN_BASE}/matchups/{g['id']}/markets/straight", pin_headers(), timeout=20, retries=2)
+    except Exception as e:
+        g["markets"], g["fetch_error"] = [], str(e); return g
+    now = time.time()
+    ok = []
+    for x in ms:
+        if x.get("status") != "open" or x.get("matchupId") != g["id"]: continue
+        c = x.get("cutoffAt")
+        if c and datetime.fromisoformat(c.replace("Z", "+00:00")).timestamp() <= now: continue
+        ok.append(x)
+    g["markets"], g["fetched"] = ok, time.time()
+    return g
 
 # ---------------------------------------------------------------- odds math
 def am_to_dec(a):
@@ -257,6 +304,7 @@ def fair_for(m, g, orient):
         if d != "draw" and "draw" not in fp and g["sport"] == 29: return None
         return fp[d], f"Pinnacle ML {'/'.join(f'{p['price']:+d}' for p in ml['prices'])}", vig
     if g["sport"] == 33 or g["sport"] == 12: return None   # tennis/esports handicaps use different units
+    if g.get("live") and g["sport"] == 29 and smt == "spreads": return None  # in-running AH settles differently
     num = re.search(r"([+-]?\d+(?:\.\d+)?)\s*$", label)
     if not num: return None
     line = float(num.group(1))
@@ -303,41 +351,74 @@ def fmt_time(ts):
     except Exception:
         return ""
 
-def scan(log=print, max_days=14, orderbooks=True, ob_limit=250):
+def scan(log=print, max_days=14, orderbooks=True, ob_limit=600, mode=None):
+    """mode: 'live' (default, in-progress games only, live Pinnacle lines) | 'upcoming' (pre-match)"""
+    mode = (mode or os.environ.get("SCAN_MODE", "live")).lower()
+    live = mode == "live"
     t0 = time.time()
     errors = []
     with ThreadPoolExecutor(3) as ex:
-        fs = ex.submit(fetch_jupiter_events, "sports", log)
-        fe = ex.submit(fetch_jupiter_events, "esports", log)
-        fp = ex.submit(fetch_pinnacle, log, errors)
+        fs = ex.submit(fetch_jupiter_events, "sports", log, live)
+        fe = ex.submit(fetch_jupiter_events, "esports", log, live)
+        fp = ex.submit(fetch_pinnacle, log, errors, live)
         events = []
+        ok_sources = 0
         for name, f in (("sports", fs), ("esports", fe)):
-            try: events += f.result()
+            try: events += f.result(); ok_sources += 1
             except Exception as e:
                 errors.append(f"Jupiter {name}: {e}"); log(f"Jupiter {name} failed: {e}")
         games = fp.result()
-    if not events:
+    if not ok_sources:
         raise RuntimeError("Jupiter feed unavailable: " + " | ".join(errors))
-    if not games:
-        errors.append("Pinnacle returned no priced games - every bet will show 'no edge data'")
+    pin_failed = sum(1 for e in errors if e.startswith("Pinnacle"))
+    if pin_failed >= len(PIN_SPORTS) - 1:
+        raise RuntimeError("Pinnacle fair-odds feed unavailable: " + (errors[-1] if errors else ""))
+    now = time.time()
+    scores = {}
+    if live:
+        # in-progress only: Jupiter isLive, started recently, scoreboard not ended
+        def started_ok(e):
+            try: b = int(e.get("beginAt") or 0)
+            except ValueError: b = 0
+            sids = jup_sport_ids(e)
+            max_h = max([LIVE_MAX_AGE_H.get(x, DEFAULT_LIVE_MAX_AGE_H) for x in sids] or [DEFAULT_LIVE_MAX_AGE_H])
+            return b and b <= now and now - b <= max_h * 3600
+        events = [e for e in events if e.get("isLive") and started_ok(e)]
+        scores = fetch_scores([e["eventId"] for e in events])
+        events = [e for e in events if not (scores.get(e["eventId"], {}).get("ended"))]
+    else:
+        events = [e for e in events if not e.get("isLive")]
     games_by_sport = {}
     for g in games: games_by_sport.setdefault(g["sport"], []).append(g)
-    now = time.time()
-    rows, n_markets, n_matched_events = [], 0, 0
+    matched = {}
     for e in events:
         if e.get("category") not in ("sports", "esports") or not e.get("isActive", True): continue
         g, orient = match_game(e, games_by_sport)
-        if g: n_matched_events += 1
-        slug = e["metadata"].get("slug") or ""
+        if g: matched[e["eventId"]] = (g, orient)
+    if live and matched:
+        uniq = {id(g): g for g, _ in matched.values()}
+        with ThreadPoolExecutor(6) as ex: list(ex.map(refresh_pinnacle_markets, uniq.values()))
+    rows, n_markets, live_markets = [], 0, 0
+    for e in events:
+        if e.get("category") not in ("sports", "esports") or not e.get("isActive", True): continue
+        g, orient = matched.get(e["eventId"], (None, None))
+        sc = scores.get(e["eventId"], {})
+        score_note = None
+        if g and live and g.get("pin_score") and re.fullmatch(r"\d+-\d+", str(sc.get("score") or "")):
+            if sorted(map(int, sc["score"].split("-"))) != sorted(g["pin_score"]):
+                score_note = f"score mismatch Jupiter {sc['score']} vs Pinnacle {'-'.join(map(str, g['pin_score']))}"
+                errors.append(f"{e['metadata']['title']}: {score_note} - fair odds rejected as stale")
+                g = None
         link = f"https://jup.ag/prediction/{e['eventId']}"
         for m in e.get("markets") or []:
             if m.get("status") != "open": continue
             ct = int(m.get("closeTime") or 0)
-            if ct and ct < now: continue
-            if max_days and ct and ct > now + max_days * 86400: continue
+            if not live:
+                if ct and ct < now: continue
+                if max_days and ct and ct > now + max_days * 86400: continue
             pr = m.get("pricing") or {}
             n_markets += 1
-            fair = fair_for(m, g, orient) if g else None
+            fair = fair_for(m, g, orient) if g and g["markets"] else None
             for side, key in (("YES", "buyYesPriceUsd"), ("NO", "buyNoPriceUsd")):
                 p = (pr.get(key) or 0) / 1e6
                 if not (0.005 < p < 0.995): continue
@@ -349,41 +430,66 @@ def scan(log=print, max_days=14, orderbooks=True, ob_limit=250):
                 opt = (m.get("marketOptions") or [{}])[0].get("label")
                 if opt and opt not in ("Yes", "No"): label = opt
                 if side == "NO" or (m.get("outcomes") == ["Yes", "No"]): label = f"{label} — {side}"
-                cost = p + fee_per_contract(p)
                 rows.append(dict(
                     event=e["metadata"]["title"], league=e["metadata"].get("league") or e.get("subcategory"),
                     category=e["category"], sub=e.get("subcategory"), market_type=m.get("sportsMarketType") or "other",
-                    selection=label, side=side, market_id=m["marketId"], price=round(p, 4),
-                    fee=round(fee_per_contract(p), 4), implied_prob=round(p, 4),
-                    fair_prob=None if q is None else round(q, 4),
-                    edge_pts=None if q is None else round(q - cost, 4),
-                    ev_per_dollar=None if q is None else round(q / cost - 1, 4),
+                    selection=label, side=side, market_id=m["marketId"], price=round(p, 4), list_price=round(p, 4),
+                    fee=None, implied_prob=None, fair_prob=None if q is None else round(q, 4),
+                    edge_pts=None, ev_per_dollar=None,
                     fair_source=desc, book_vig=None if vig is None else round(vig, 4),
                     pin_match=None if not g else f"{g['away']} @ {g['home']} ({g['league']})",
+                    pin_live_mode=g.get("live_mode") if g else None,
                     in_play=bool(e.get("isLive")), volume=pr.get("volume"),
+                    score=sc.get("score"), period=sc.get("period"), elapsed=sc.get("elapsed"),
+                    score_updated=sc.get("updatedAt"),
                     closes=fmt_time(ct or e.get("beginAt")), starts=fmt_time(e.get("beginAt")),
-                    close_ts=ct, link=link, depth_best=None, depth_ok=None, ob_ask=None))
-    # order books for +EV candidates (depth = how much $ you can buy while edge >= 0)
-    cands = sorted([r for r in rows if r["edge_pts"] is not None and r["edge_pts"] >= -0.005],
-                   key=lambda r: -r["fair_prob"])[:ob_limit]
+                    close_ts=ct, link=link, depth_best=None, depth_ok=None, ob_ask=None,
+                    price_ts=int(t0), fair_ts=int(g["fetched"]) if (g and q is not None) else None,
+                    price_src="event list", score_note=score_note))
+    live_markets = n_markets if live else 0
+    # fresh order books: live = every priced row; upcoming = near/+EV candidates
+    if live:
+        cands = [r for r in rows if r["fair_prob"] is not None][:ob_limit]
+    else:
+        tmp = [r for r in rows if r["fair_prob"] is not None and r["fair_prob"] - r["price"] - fee_per_contract(r["price"]) >= -0.005]
+        cands = sorted(tmp, key=lambda r: -r["fair_prob"])[:ob_limit]
     if orderbooks and cands:
+        mids = list({r["market_id"] for r in cands})
         with ThreadPoolExecutor(8) as ex:
-            obs = list(ex.map(lambda r: fetch_orderbook(r["market_id"]), cands))
-        if cands and not any(obs): errors.append("Jupiter /orderbook unavailable - depth columns empty")
-        for r, ob in zip(cands, obs):
+            obs = dict(zip(mids, ex.map(lambda mid: (fetch_orderbook(mid), time.time()), mids)))
+        if not any(o for o, _ in obs.values()): errors.append("Jupiter /orderbook unavailable - using listed prices")
+        for r in cands:
+            ob, ts = obs[r["market_id"]]
             a, b, c = depth_info(ob, r["side"], r["fair_prob"])
             r["ob_ask"], r["depth_best"], r["depth_ok"] = a, b, c
+            if a is not None:
+                r["price"], r["price_ts"], r["price_src"] = a, int(ts), "order book"
+            elif ob is not None:
+                r["price_src"] = "no asks"   # nothing to buy right now
     for r in rows:
+        p = r["price"]; r["fee"] = round(fee_per_contract(p), 4); r["implied_prob"] = round(p, 4)
+        if r["fair_prob"] is not None:
+            cost = p + fee_per_contract(p)
+            r["edge_pts"] = round(r["fair_prob"] - cost, 4); r["ev_per_dollar"] = round(r["fair_prob"] / cost - 1, 4)
+            r["lag_s"] = abs(r["price_ts"] - r["fair_ts"]) if r["fair_ts"] else None
         w = []
-        if r["edge_pts"] is not None and r["edge_pts"] > 0.10: w.append("edge >10pts: verify match/rules")
-        if r["in_play"]: w.append("in-play: prices move fast")
+        if r["edge_pts"] is not None and r["edge_pts"] > 0.10: w.append("edge >10pts: verify match/rules/score")
+        if r.get("score_note"): w.append(r["score_note"])
+        if r["pin_live_mode"] == "danger_zone": w.append("Pinnacle danger-zone line (attack in progress)")
+        if r["price_src"] == "no asks": w.append("no asks on book")
         if r["edge_pts"] is not None and r["edge_pts"] >= 0 and r["depth_ok"] == 0: w.append("no fill at +EV price")
         r["warn"] = "; ".join(w)
+    # in live mode a row with no asks cannot be bet -> drop its edge
+    if live:
+        for r in rows:
+            if r["price_src"] == "no asks": r["edge_pts"] = r["ev_per_dollar"] = None
     rows.sort(key=lambda r: (r["edge_pts"] is None, -(r["fair_prob"] or 0)))
-    stats = dict(errors=errors, events=len(events), markets_scanned=n_markets, rows=len(rows),
-                 events_matched=n_matched_events, pinnacle_games=len(games),
+    ev_ids = {r["event"] for r in rows if r["fair_prob"] is not None}
+    stats = dict(errors=errors, mode=mode, events=len(events), markets_scanned=n_markets, rows=len(rows),
+                 live_events=len(events) if live else 0, live_markets=live_markets,
+                 events_matched=len(matched), events_with_fair=len(ev_ids), pinnacle_games=len(games),
                  with_fair=sum(r["fair_prob"] is not None for r in rows),
-                 positive=sum((r["edge_pts"] or -1) >= 0 for r in rows),
+                 positive=sum((r["edge_pts"] if r["edge_pts"] is not None else -1) >= 0 for r in rows),
                  seconds=round(time.time() - t0, 1),
                  scanned_at=datetime.now(NY).strftime("%Y-%m-%d %I:%M:%S %p ET"))
     log(f"done: {stats}")
@@ -398,8 +504,9 @@ if __name__ == "__main__":
     ap.add_argument("--csv"); ap.add_argument("--json"); ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--days", type=int, default=14, help="only markets closing within N days (0 = all)")
     ap.add_argument("--min-depth", type=float, default=0)
+    ap.add_argument("--mode", choices=["live", "upcoming"], default=os.environ.get("SCAN_MODE", "live"))
     a = ap.parse_args()
-    res = scan(log=lambda s: print(s, file=sys.stderr), max_days=a.days)
+    res = scan(log=lambda s: print(s, file=sys.stderr), max_days=a.days, mode=a.mode)
     if a.json: json.dump(res, open(a.json, "w"))
     bb = best_bets(res, 0.0, a.min_depth)
     if a.csv:

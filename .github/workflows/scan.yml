@@ -1,7 +1,18 @@
 name: scan
+run-name: "scan ${{ inputs.mode || 'live' }} ${{ inputs.request_id }}"
 
 on:
-  workflow_dispatch:          # "Run workflow" button on the Actions page = Scan
+  workflow_dispatch:          # triggered by the dashboard's Scan button (or "Run workflow" on the Actions page)
+    inputs:
+      mode:
+        description: "live = in-progress games only (default); upcoming = pre-match"
+        type: choice
+        options: [live, upcoming]
+        default: live
+      request_id:
+        description: "set by the dashboard so it can find this run"
+        type: string
+        default: ""
   # schedule:                 # uncomment for automatic scans (UTC cron; GitHub may delay runs a few minutes)
   #   - cron: "*/30 * * * *"  # every 30 minutes
 
@@ -37,6 +48,8 @@ jobs:
         env:
           JUP_API_KEY: ${{ secrets.JUP_API_KEY }}   # optional; leave the secret unset if you don't have one
           SCAN_DAYS: "14"
+          SCAN_MODE: ${{ inputs.mode || 'live' }}
+          SCAN_REQUEST_ID: ${{ inputs.request_id }}
         run: python scanner/run_scan.py
 
       - name: Commit results

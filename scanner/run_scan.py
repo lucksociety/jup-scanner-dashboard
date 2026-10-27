@@ -13,7 +13,10 @@ MIN_EDGE_KEEP = float(os.environ.get("KEEP_MIN_EDGE", "-0.05"))  # drop rows wor
 ALT_BASE = "https://api.jup.ag/prediction/v1"
 KEEP = ["event", "league", "category", "market_type", "selection", "side", "price", "fee", "implied_prob",
         "fair_prob", "edge_pts", "ev_per_dollar", "fair_source", "pin_match", "in_play", "closes", "close_ts",
-        "starts", "link", "depth_best", "depth_ok", "warn", "market_id"]
+        "starts", "link", "depth_best", "depth_ok", "warn", "market_id", "score", "period", "elapsed",
+        "price_ts", "fair_ts", "lag_s", "price_src", "list_price"]
+MODE = os.environ.get("SCAN_MODE", "live").lower()
+REQUEST_ID = os.environ.get("SCAN_REQUEST_ID", "")
 
 def now_et():
     return datetime.now(scanner.NY).strftime("%Y-%m-%d %I:%M:%S %p ET")
@@ -25,10 +28,10 @@ def load_prev():
 
 def main():
     started = time.time()
-    runner = {"github_run": os.environ.get("GITHUB_RUN_ID"), "runner": os.environ.get("RUNNER_NAME", "local")}
+    runner = {"request_id": REQUEST_ID, "github_run": os.environ.get("GITHUB_RUN_ID"), "runner": os.environ.get("RUNNER_NAME", "local")}
     res, err = None, None
     try:
-        res = scanner.scan(log=lambda s: print(s, flush=True), max_days=DAYS)
+        res = scanner.scan(log=lambda s: print(s, flush=True), max_days=DAYS, mode=MODE)
     except Exception as e:
         err = str(e)
         print("primary scan failed:", err, file=sys.stderr)
@@ -36,7 +39,7 @@ def main():
             print("retrying via official api.jup.ag with JUP_API_KEY", flush=True)
             scanner.JUP_BASE = ALT_BASE
             try:
-                res = scanner.scan(log=lambda s: print(s, flush=True), max_days=DAYS)
+                res = scanner.scan(log=lambda s: print(s, flush=True), max_days=DAYS, mode=MODE)
                 res["stats"]["errors"].insert(0, f"primary Jupiter host failed, used api.jup.ag: {err}")
                 err = None
             except Exception as e2:
@@ -50,16 +53,19 @@ def main():
         priced = [{k: r.get(k) for k in KEEP} for r in rows
                   if r["fair_prob"] is not None and r["edge_pts"] >= MIN_EDGE_KEEP]
         st = res["stats"]
-        out = dict(status="ok" if not st["errors"] else "partial", errors=st["errors"],
+        out = dict(status="ok" if not st["errors"] else "partial", errors=st["errors"], mode=st["mode"],
+                   request_id=REQUEST_ID,
                    scanned_at=now_et(), scanned_at_unix=int(time.time()), last_success=now_et(),
                    counts=dict(events=st["events"], markets_scanned=st["markets_scanned"], bets=st["rows"],
                                with_fair=st["with_fair"], positive_ev=st["positive"],
                                no_edge_data=st["rows"] - st["with_fair"], pinnacle_games=st["pinnacle_games"],
-                               events_matched=st["events_matched"], rows_in_file=len(priced)),
+                               events_matched=st["events_matched"], rows_in_file=len(priced),
+                               live_events=st["live_events"], live_markets=st["live_markets"],
+                               events_with_fair=st["events_with_fair"]),
                    seconds=round(time.time() - started, 1), runner=runner, rows=priced)
     else:
         prev = load_prev()
-        out = dict(status="error", errors=[err],
+        out = dict(status="error", errors=[err], mode=MODE, request_id=REQUEST_ID,
                    scanned_at=now_et(), scanned_at_unix=int(time.time()),
                    last_success=prev.get("last_success"), counts=prev.get("counts", {}),
                    seconds=round(time.time() - started, 1), runner=runner,
