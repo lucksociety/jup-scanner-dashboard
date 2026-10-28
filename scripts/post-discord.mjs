@@ -13,7 +13,7 @@ if (E.REQUEST_ID && data.request_id !== E.REQUEST_ID) data = { status: "error", 
 // fresh win chances / scores / Buy prices right before posting (same logic as the dashboard's live updates)
 let note = "";
 if (E.LIVE_REFRESH !== "0") {
-  try { note = await refreshForCard(data); console.log("live refresh:", note || "nothing to refresh"); }
+  try { note = await refreshForCard(data, { liveUrl: process.env.LIVE_URL ?? "https://luck-society-livebets.dreiss324.workers.dev/live" }); console.log("live refresh:", note || "nothing to refresh"); }
   catch (e) { console.log("live refresh failed, posting scan values:", e.message); }
 }
 const msg = buildMessage(data, { count: Math.max(1, Math.min(10, +E.DISCORD_COUNT || 5)), dashboardUrl: dash, note,

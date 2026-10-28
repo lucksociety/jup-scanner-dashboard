@@ -39,12 +39,13 @@ def http_json(url, headers=None, timeout=60, retries=3):
     return http_json_meta(url, headers, timeout, retries)[0]
 
 def as_of(hdrs):
-    """when a (possibly CDN-cached) response was produced, unix s: Last-Modified, else Date - Age"""
+    """when a (possibly CDN-cached) response was fetched from the origin, unix s: Date - Age (the CDN fill time).
+    Last-Modified is NOT used first: Pinnacle's CDN rewrites it on revalidation, so it can be later than the content."""
     from email.utils import parsedate_to_datetime
-    for k in ("Last-Modified", "Date"):
+    for k in ("Date", "Last-Modified"):
         try:
             t = parsedate_to_datetime(hdrs.get(k)).timestamp()
-            return t if k == "Last-Modified" else t - float(hdrs.get("Age") or 0)
+            return t - float(hdrs.get("Age") or 0) if k == "Date" else t
         except Exception: pass
     return None
 
@@ -418,6 +419,18 @@ def match_game(e, games_by_sport):
                 orient = {teams[0]: "home", teams[1]: "away"} if s1 >= s2 else {teams[0]: "away", teams[1]: "home"}
     return (best, orient) if bs >= 0.7 else (None, None)
 
+def score_side(e, g):
+    """Which Pinnacle side (home/away) is listed FIRST in Jupiter's scoreboard. Jupiter's score text follows the event
+    title order ("Nets vs. Celtics" -> "36-30" = Nets 36), which is away-first for US leagues and home-first for soccer/tennis,
+    and is not always the order of the moneyline outcomes. The live model needs it to know which score is whose."""
+    t = re.sub(r"^[^:]*:\s*", "", e["metadata"]["title"])
+    t = re.sub(r"\(.*?\)|\s-\s.*$", "", t)
+    parts = re.split(r"\s+vs\.?\s+", t)
+    if len(parts) != 2: return None
+    pp = g["sport"] in (33, 22, 6)
+    h, a = name_score(parts[0], g["home"], pp), name_score(parts[0], g["away"], pp)
+    return None if max(h, a) < 0.7 or h == a else ("home" if h > a else "away")
+
 def side_of(name, orient):
     best, bs = None, 0
     for t, d in orient.items():
@@ -627,7 +640,8 @@ def scan(log=print, max_days=14, orderbooks=True, ob_limit=4000, mode=None):
                 if fair:
                     q = fair[0] if side == "YES" else 1 - fair[0]
                     desc, vig = fair[1], fair[2]
-                    if live: pin = dict(pin_id=g["id"], pin_sport=g["sport"], pin_key=fair[3][0], pin_d=fair[3][1])
+                    if live: pin = dict(pin_id=g["id"], pin_sport=g["sport"], pin_key=fair[3][0], pin_d=fair[3][1],
+                                      pin_sh=score_side(e, g), pin_league=g.get("league"))
                 label = m.get("title", "")
                 opt = (m.get("marketOptions") or [{}])[0].get("label")
                 if opt and opt not in ("Yes", "No"): label = opt

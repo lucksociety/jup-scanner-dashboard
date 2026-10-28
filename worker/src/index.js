@@ -121,7 +121,7 @@ export async function handleLive(req, env) {
   }
   const q = parseQuery(new URL(req.url).searchParams);
   if (!q.ids.length && !q.events.length) return new Response(JSON.stringify({ error: "pass ids=<pinnacle matchup ids>&sports=<pinnacle sport ids>&events=<jupiter event ids> (max 30 each)" }), { status: 400, headers: h });
-  const key = JSON.stringify([q.ids.slice().sort(), q.sports.slice().sort(), q.events.slice().sort()]), now = Date.now();
+  const key = JSON.stringify([q.ids.slice().sort(), q.sports.slice().sort(), q.events.slice().sort(), q.pairs.map(p => p.join("~")).sort()]), now = Date.now();
   const hit = answers.get(key);
   if (hit && now - hit.t < LIVE_TTL_MS) return new Response(hit.body, { headers: { ...h, "X-Cache": "HIT" } });
   const out = await fetchLive(q, cachedJSON);

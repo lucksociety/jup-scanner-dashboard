@@ -154,12 +154,34 @@ To restrict who can use it: Server Settings → Integrations → Luck Society Li
   (`/events/scores`, the same data jup.ag's scoreboard shows; jup.ag itself refetches it every 10 s). The page then updates score and
   clock, recomputes win chance and edge with the live Buy price, re-ranks Top picks, and shows "Win chance updated Xs ago".
   One shared module, `docs/live-core.js`, does this for the Worker, the dashboard and the Discord card.
-- **Paused bets (⏸, greyed, never a Top pick):** the sharp line is suspended or pulled, Pinnacle's score disagrees with Jupiter's,
-  the game is over, **the score changed after the sharp line was produced**, or the sharp line is **over 5 minutes old**.
+- **Where each win chance comes from (badge under the win chance):**
+  - 🟢 **sharp live**: Pinnacle's live line, at most 60 s old and made after the current score.
+  - 🟡 **model**: Pinnacle's line is older (or older than the last score change), so a free in-game model moves that last
+    line to the current score and clock (details below). Hover the badge to see how old the line it started from is.
+  - ⚪ **sharp line**: Pinnacle's line, older than 60 s, with no score change since and no model for the sport.
+  - 🔴 **paused** (greyed, never a Top pick): no trustworthy number. Reasons: the line is suspended or pulled, Pinnacle's
+    score disagrees with Jupiter's, the game is over, or the score changed and the model can't run (hover for why).
+- **In-game model (free, no paid feeds):** `docs/live-core.js`, the same code for the dashboard, Worker and Discord card.
+  - It starts from Pinnacle's last open line (de-vigged) and the score/clock Jupiter showed **when that line was made**
+    (from a scoreboard history kept by the tab or Worker). It fits the model to that line, then recomputes at the current
+    score/clock and applies the change in log-odds to Pinnacle's number. With no change the answer is exactly Pinnacle's line.
+  - Soccer: Poisson goals (stoppage time, rising late-game goal rate); full-game totals, live handicaps skipped.
+    Hockey: Poisson goals, OT/shootout leans to the stronger side. Baseball: Poisson runs by innings left.
+    Basketball: normal score margin by time left (NBA sd 14, NCAA 12.5, WNBA 12 per game), fitted to moneyline/spread/total.
+  - Only used when the starting line is ≤ 15 min old, was made ≥ 30 s after the last score change (basketball ≥ 8 s),
+    and the model fits that line within 5 pts.
+  - **Enabled:** soccer, basketball, hockey, baseball. **Off:** football (possession/field position matter too much),
+    tennis (who is serving is unknown; too few samples), and esports/MMA/cricket (no model, line only).
+  - **Backtest (Oct 27 2026, ~20:45 ET, one evening):** model vs the next fresh Pinnacle line, mean absolute error in win-chance points,
+    for starting lines 5–15 min old: soccer 0.8 (stale line 5.3), hockey 1.7 (7.2; 2.9 vs 19.6 after a goal), baseball 2.4 (4.0),
+    basketball 2.1 (2.8; worse than the stale line, 3.0 vs 1.7, for lines < 2 min old), football 17.5 (off), tennis 4.4 (off).
+    Small sample (1–7 games per sport), so treat these as rough.
+  - Limits: no possession, serve, power play, empty net or red cards; a new tab or Worker instance has no scoreboard history yet,
+    so until it has watched the game for a bit it can only start from lines made after it opened.
 - **Why lines can be old:** Pinnacle's public feed is served from Pinnacle's CDN with `max-age≈900 s`, so a "live" line can be up to
   ~15 minutes old no matter how often anyone polls. The scanner and the Worker read both cached copies (per-matchup and per-sport),
-  keep the newer one (market `version`), and record its age (`line_as_of`, from `Last-Modified`). The "Sharp line" column shows
-  "line X min old". This is the real limit on win-chance freshness; the pause rules above stop stale lines from becoming picks.
+  keep the newer one (market `version`), and record its age (`line_as_of` = the response `Date` minus `Age`, i.e. when the CDN fetched
+  it; `Last-Modified` is only a fallback because the CDN rewrites it). The "Sharp line" column shows "line X min old".
 - If `/live` fails (3 polls in a row), the page falls back to the old rule: win chances older than 5 minutes are marked
   "old win chance" and left out of Top picks.
 - `/live` limits: CORS for `lucksociety.github.io` (and localhost:8765 for testing), a 3 s cache per Worker instance, max 30 ids,
@@ -167,7 +189,7 @@ To restrict who can use it: Server Settings → Integrations → Luck Society Li
   Free plan: 100,000 Worker requests/day. One open dashboard tab uses ~17,000/day (1 every 5 s, paused while the tab is hidden), so
   about 5 tabs open all day fit. Each `/live` call makes ≤ 30 + 2×sports + 2 upstream requests (free plan cap: 50).
 - **Discord:** right before posting, `/livebets` (the GitHub Action step) runs the same refresh for its candidate bets: fresh win
-  chance, score and Buy price (REST order book), the same pause rules, then re-ranks. The card says "⚡ … refreshed live just before
+  chance (sharp live / model / paused, shown on the card), score and Buy price (REST order book), the same rules, then re-ranks. The card says "⚡ … refreshed live just before
   posting". A card re-used inside the 60 s cooldown is not refreshed again.
 - **Updated** column = how long ago the price was read.
 

@@ -6,7 +6,7 @@ import http from "node:http";
 import worker, { _resetGuard } from "../src/index.js";
 import { buildMessage, sealToken, openToken, topPicks, refreshForCard } from "../src/embed.js";
 import { handleLive } from "../src/index.js";
-import { applyLiveRow, liveRow, devig, feeOf } from "../../docs/live-core.js";
+import { applyLiveRow, liveRow, devig, feeOf, gameState, modelFair, targetFor, noteObs, stateAt, MODEL_SPORTS, settleFor, queryFor, queryString, parseQuery } from "../../docs/live-core.js";
 
 const hex = u8 => Buffer.from(u8).toString("hex");
 const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
@@ -200,5 +200,65 @@ console.log("✓ workflow step: decrypts token, PATCHes @original with embed; mi
   assert.match(JSON.stringify(buildMessage(data, { note })), /refreshed live/);
   globalThis.fetch = f0;
   console.log("✓ GET /live: caps, CORS, 3 s memo, 429 rate limit, de-vig + newest copy, line age, flags; Discord card refresh + paused rows excluded");
+}
+// 9 in-game model (docs/live-core.js): parses Jupiter's scoreboard, moves Pinnacle's last line to the current state
+{
+  const near = (a, b, e, m) => assert.ok(Math.abs(a - b) <= e, `${m}: ${a} vs ${b}`);
+  // Jupiter score text follows the title order; pin_sh says which Pinnacle side that first team is
+  assert.deepEqual([gameState(4, "NBA", { score: "36-30", period: "Q2", elapsed: "09:37" }, "away")].map(s => [s.h, s.a, +s.rem.toFixed(2)])[0], [30, 36, 33.62]);
+  assert.equal(gameState(29, "", { score: "0-2", period: "2H", elapsed: "59" }, "home").a, 2);
+  assert.equal(gameState(19, "NHL", { score: "3-0", period: "P2", elapsed: "10:00" }, "away").a, 3);
+  assert.deepEqual(gameState(3, "MLB", { score: "2-0", period: "Bot 3rd" }, "away"), { h: 0, a: 2, sid: 3, ra: 6, rh: 6.5, inning: 3, half: "BOT" });
+  const ts = gameState(33, "ATP", { score: "6-2, 6-6(5-3)", period: "TB2" }, "home");
+  assert.deepEqual([ts.sets, ts.g, ts.tb], [[1, 0], [6, 6], [5, 3]]);
+  assert.equal(gameState(29, "", { score: "1-1", period: "FT", ended: true }, "home"), null, "finished game -> no state");
+  // soccer: no change -> exactly Pinnacle's line; home goal -> home up; time passing at 0-0 -> draw + under up
+  const SL = { "s;0;m": [["home", null, 0.40], ["away", null, 0.25], ["draw", null, 0.35]], "s;0;ou;1.5": [["over", 1.5, 0.45], ["under", 1.5, 0.55]] };
+  const sA = gameState(29, "", { score: "0-0", period: "2H", elapsed: "60" }, "home");
+  const same = modelFair(29, "", SL, sA, sA).fair;
+  near(same["s;0;m|home"], 0.40, 1e-6, "identity home"); near(same["s;0;ou;1.5|over"], 0.45, 1e-6, "identity over");
+  const goal = modelFair(29, "", SL, sA, gameState(29, "", { score: "1-0", period: "2H", elapsed: "61" }, "home")).fair;
+  assert.ok(goal["s;0;m|home"] > 0.7 && goal["s;0;ou;1.5|over"] > 0.45, "home goal");
+  const later = modelFair(29, "", SL, sA, gameState(29, "", { score: "0-0", period: "2H", elapsed: "80" }, "home")).fair;
+  assert.ok(later["s;0;m|draw"] > 0.5 && later["s;0;ou;1.5|under"] > 0.7, "20 scoreless minutes");
+  // basketball: a 10-0 run for the home side moves the home win chance up; a target total that isn't in the anchor copy is priced
+  const BL = { "s;0;m": [["home", null, 0.6], ["away", null, 0.4]], "s;0;s;-3.5": [["home", -3.5, 0.5], ["away", 3.5, 0.5]], "s;0;ou;220.5": [["over", 220.5, 0.5], ["under", 220.5, 0.5]] };
+  const bA = gameState(4, "NBA", { score: "50-50", period: "Q3", elapsed: "12:00" }, "away"), bB = gameState(4, "NBA", { score: "50-60", period: "Q3", elapsed: "09:00" }, "away");
+  const bm = modelFair(4, "NBA", BL, bA, bB, { ...BL, ...targetFor("s;0;ou;225.5") }).fair;
+  assert.ok(bm["s;0;m|home"] > 0.75, "home run"); assert.ok(bm["s;0;ou;225.5|over"] < bm["s;0;ou;220.5|over"], "higher total line -> lower over");
+  // hockey + MLB + tennis move the right way
+  const HL = { "s;0;m": [["home", null, 0.55], ["away", null, 0.45]], "s;0;ou;6.5": [["over", 6.5, 0.45], ["under", 6.5, 0.55]] };
+  const h = modelFair(19, "NHL", HL, gameState(19, "NHL", { score: "0-0", period: "P1", elapsed: "15:00" }, "away"), gameState(19, "NHL", { score: "1-0", period: "P1", elapsed: "14:00" }, "away")).fair;
+  assert.ok(h["s;0;m|home"] < 0.4, "away (listed first) scores -> home down");
+  const ML = { "s;0;m": [["home", null, 0.55], ["away", null, 0.45]], "s;0;ou;8.5": [["over", 8.5, 0.5], ["under", 8.5, 0.5]] };
+  const b = modelFair(3, "MLB", ML, gameState(3, "MLB", { score: "0-0", period: "Top 1st" }, "away"), gameState(3, "MLB", { score: "0-3", period: "Top 4th" }, "away")).fair;
+  assert.ok(b["s;0;m|home"] > 0.75, "home up 3 in the 4th");
+  const TL = { "s;0;m": [["home", null, 0.6], ["away", null, 0.4]] };
+  assert.ok(!MODEL_SPORTS.has(33) && !MODEL_SPORTS.has(15) && MODEL_SPORTS.has(4), "football + tennis off after the backtest"); assert.equal(settleFor(4), 8); assert.equal(settleFor(19), 30);
+  MODEL_SPORTS.add(33); MODEL_SPORTS.add(15);   // the math is still tested while those sports are switched off
+  const t = modelFair(33, "ATP Challenger", TL, gameState(33, "ATP Challenger", { score: "3-3", period: "S1" }, "home"), gameState(33, "ATP Challenger", { score: "6-3, 2-0", period: "S2" }, "home")).fair;
+  assert.ok(t["s;0;m|home"] > 0.85, "won the first set and leads the second");
+  MODEL_SPORTS.delete(33); MODEL_SPORTS.delete(15);
+  // scoreboard history -> the state at the moment the line was made (unknown around a score change)
+  const T0 = 1.8e12; noteObs("H1", { score: "0-0", period: "2H", elapsed: "50" }, T0); noteObs("H1", { score: "0-0", period: "2H", elapsed: "51" }, T0 + 60e3);
+  noteObs("H1", { score: "1-0", period: "2H", elapsed: "52" }, T0 + 120e3); noteObs("H1", { score: "1-0", period: "2H", elapsed: "55" }, T0 + 300e3);
+  assert.equal(stateAt("H1", T0 + 61e3 - 1000).score, "0-0"); assert.equal(stateAt("H1", T0 + 90e3), null, "between the readings around a goal");
+  assert.equal(stateAt("H1", T0 + 130e3), null, "just after a goal"); assert.equal(stateAt("H1", T0 + 200e3).score, "1-0");
+  assert.equal(stateAt("H1", T0 - 5e3), null, "before our history");
+  assert.equal(stateAt("H1", T0 + 130e3, 8).score, "1-0", "basketball-style 8 s settle"); assert.equal(stateAt("H1", T0 + 130e3, 0).since_s, 10);
+  // liveRow blend: stale line + score changed -> "model"; fresh line -> "sharp live"; sport without a model -> paused
+  const at = T0 + 300e3, anchor = { as_of: T0 + 30e3, lines: SL };
+  const g = (o = {}) => ({ found: true, status: "started", suspended: false, fair: { "s;0;m|home": 0.4, "s;0;m|away": 0.25, "s;0;m|draw": 0.35 }, as_of: { "s;0;m": anchor.as_of }, line_as_of: anchor.as_of, anchor, ...o });
+  const live = { at, pin: { "7": g(), "8": g({ as_of: { "s;0;m": at - 20e3 }, line_as_of: at - 20e3 }) }, jup: { H1: { score: "1-0", period: "2H", elapsed: "55", score_changed_at: T0 + 120e3 } } };
+  const mrow = { pin_id: 7, pin_sport: 29, pin_key: "s;0;m", pin_d: "home", pin_sh: "home", event_id: "H1", side: "YES" };
+  const m1 = liveRow(mrow, live); assert.equal(m1.src, "model"); assert.equal(m1.flag, null); assert.ok(m1.fair > 0.7, "goal priced in: " + m1.fair);
+  assert.equal(m1.line_flag, "line behind score");
+  assert.equal(liveRow({ ...mrow, side: "NO" }, live).fair, +(1 - m1.fair).toFixed(4));
+  const f1 = liveRow({ ...mrow, pin_id: 8 }, { ...live, jup: { H1: { ...live.jup.H1, score_changed_at: T0 } } });
+  assert.equal(f1.src, "sharp live"); assert.equal(f1.fair, 0.4);
+  const p1 = liveRow({ ...mrow, pin_sport: 34 }, live); assert.equal(p1.src, "paused"); assert.equal(p1.flag, "line behind score"); assert.match(p1.model_why, /no model/);
+  // the dashboard's query carries event~matchup pairs so /live can return the anchor's scoreboard
+  const q = queryFor([mrow]); assert.deepEqual(q.pairs, [["H1", "7"]]); assert.deepEqual(parseQuery(new URLSearchParams(queryString(q))).pairs, [["H1", "7"]]);
+  console.log("✓ in-game model: scoreboard parsing, soccer/basketball/hockey/MLB/tennis moves, identity at no change, history anchor, sharp live / model / paused");
 }
 console.log("\nALL TESTS PASSED");

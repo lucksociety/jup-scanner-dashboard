@@ -131,3 +131,10 @@ footer{margin-top:28px;color:var(--mut);font-size:12.5px;line-height:1.6;text-al
 /* live win-chance feed: bets paused because the sharp line is suspended/out of date or the scores disagree */
 tr.paused td{opacity:.55}tr.paused td.go,tr.paused td:nth-child(6){opacity:1}
 .sub.flag{color:var(--warn);font-weight:600;white-space:nowrap}
+
+/* where the live win chance comes from */
+.srcb{display:inline-block;margin-top:3px;padding:1px 6px;border-radius:999px;font-size:10.5px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;cursor:help;white-space:nowrap}
+.src-sharp-live{background:rgba(31,174,78,.16);color:#3ddc84}
+.src-model{background:rgba(249,216,50,.14);color:var(--gold,#f9d832)}
+.src-sharp-line{background:rgba(160,160,160,.14);color:#c8c8c8}
+.src-paused{background:rgba(229,83,61,.14);color:#ff7a66}

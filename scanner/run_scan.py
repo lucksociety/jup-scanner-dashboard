@@ -15,7 +15,7 @@ KEEP = ["event", "league", "category", "market_type", "selection", "side", "pric
         "fair_prob", "edge_pts", "ev_per_dollar", "fair_source", "pin_match", "in_play", "closes", "close_ts",
         "starts", "link", "depth_best", "depth_ok", "warn", "market_id", "score", "period", "elapsed",
         "price_ts", "fair_ts", "lag_s", "price_src", "book_src", "list_price", "scan_price", "price_move", "meter", "meter_ts",
-        "event_id", "pin_id", "pin_sport", "pin_key", "pin_d","line_as_of"]   # pin_* = the exact Pinnacle line, so it can be re-priced live
+        "event_id", "pin_id", "pin_sport", "pin_key", "pin_d", "pin_sh", "pin_league", "line_as_of"]   # pin_* = the exact Pinnacle line, so it can be re-priced live
 # price      = executable ask from jup.ag's live order-book websocket (= the Buy button), the ONLY price used for edge
 # list_price = Jupiter's card quote at scan start (info only); meter = jup.ag's "% chance" meter (display only)
 MAX_ROWS = int(os.environ.get("MAX_ROWS", "1500"))
