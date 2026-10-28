@@ -76,7 +76,7 @@ export function buildMessage(data, { count = 5, dashboardUrl = "", logoUrl = "",
     : `**${(c.events || 0).toLocaleString("en-US")}** upcoming games · **${(c.markets_scanned || 0).toLocaleString("en-US")}** markets · **${c.positive_ev || 0}** value bets`;
   if (!picks.length) {
     return { content: "", embeds: [{ ...base, color: GOLD, title: live ? "🍀 No live value bets right now" : "🍀 No upcoming value bets right now",
-      description: `${summary}\nNo bet has zero or positive edge with money available. Try again in a few minutes.\n${links}\n\n*${CAVEAT}*`.trim() }] };
+      description: `${summary}${note ? `\n${note}` : ""}\nNo bet has zero or positive edge with money available. Try again in a few minutes.\n${links}\n\n*${CAVEAT}*`.trim() }] };
   }
   const fields = picks.map((r, i) => {
     const clock = [r.score, [r.period, r.elapsed ? r.elapsed + "'" : ""].filter(Boolean).join(" ")].filter(Boolean).join(" · ");

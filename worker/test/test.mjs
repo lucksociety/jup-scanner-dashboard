@@ -1,6 +1,7 @@
 // Local tests: node test/test.mjs   (no network, no accounts; everything external is mocked)
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 import http from "node:http";
 import worker, { _resetGuard } from "../src/index.js";
@@ -14,6 +15,11 @@ const pub = hex(new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey
 const env = { DISCORD_PUBLIC_KEY: pub, GITHUB_TOKEN: "ghp_test", GITHUB_REPO: "o/r", GITHUB_BRANCH: "main", WORKFLOW_FILE: "scan.yml",
   DASHBOARD_URL: "https://o.github.io/r/", COOLDOWN_SECONDS: "60", RELAY_KEY: "relay-secret-123" };
 const results = JSON.parse(readFileSync(new URL("../../docs/data/results.json", import.meta.url)));
+// the snapshot's lines age in real time (picks skip lines > 5 min old), so pretend it was just scanned: tests must not depend on the clock
+{ const shift = Math.floor(Date.now() / 1000) - (results.scanned_at_unix || Math.floor(Date.now() / 1000));
+  for (const r of results.rows || []) for (const k of ["line_as_of", "price_ts", "scanned_at_unix"]) if (typeof r[k] === "number") r[k] += shift;
+  if (results.scanned_at_unix) results.scanned_at_unix += shift; }
+const RESULTS_FILE = `${tmpdir()}/livebets-test-results.json`; writeFileSync(RESULTS_FILE, JSON.stringify(results));
 
 let calls = [], runs = [];
 globalThis.fetch = async (url, init = {}) => {
@@ -109,7 +115,7 @@ const sealed = await sealToken("itok_wf", env.RELAY_KEY);
 import { spawn } from "node:child_process";
 const runAsync = extra => new Promise(res => { const p = spawn("node", ["../scripts/post-discord.mjs"], { cwd: new URL("..", import.meta.url).pathname,
   env: { ...process.env, DISCORD_API: `http://127.0.0.1:${srv.address().port}`, DISCORD_APP_ID: "app123", DISCORD_TOKEN: sealed, DISCORD_RELAY_KEY: env.RELAY_KEY,
-    DISCORD_COUNT: "5", DISCORD_USER: "Tester", REQUEST_ID: results.request_id || "", RESULTS_PATH: "../docs/data/results.json", DASHBOARD_URL: env.DASHBOARD_URL, ...extra } });
+    DISCORD_COUNT: "5", DISCORD_USER: "Tester", REQUEST_ID: results.request_id || "", RESULTS_PATH: RESULTS_FILE, DASHBOARD_URL: env.DASHBOARD_URL, ...extra } });
   let out = ""; p.stdout.on("data", c => out += c); p.stderr.on("data", c => out += c); p.on("close", code => res({ code, out })); });
 let w = await runAsync({});
 assert.equal(w.code, 0, w.out); assert.equal(got[0].method, "PATCH"); assert.equal(got[0].url, "/webhooks/app123/itok_wf/messages/@original");
