@@ -49,29 +49,19 @@ async function fetchResults(env) {
 const msgOpts = (env, count, user, note) => ({ count, dashboardUrl: env.DASHBOARD_URL, logoUrl: env.DASHBOARD_URL ? env.DASHBOARD_URL.replace(/\/?$/, "/") + "assets/logo.jpg" : "", requestedBy: user, note });
 
 async function handleLivebets(env, it, ctx) {
-  const opts = Object.fromEntries((it.data.options || []).map(o => [o.name, o.value]));
-  const mode = opts.mode === "upcoming" ? "upcoming" : "live";
-  const count = Math.max(1, Math.min(10, parseInt(opts.count || 5, 10) || 5));
+  // /livebets has no options: always a fresh scan of live (in-progress) games, top 5 picks
+  const mode = "live", count = 5;
   const user = (it.member?.user || it.user || {}).global_name || (it.member?.user || it.user || {}).username || "";
   const cool = parseInt(env.COOLDOWN_SECONDS || "60", 10) * 1000, now = Date.now();
   if (!env.GITHUB_TOKEN) return ephemeral("The scanner isn't configured yet (missing GITHUB_TOKEN secret on the Worker).");
 
-  // cooldown: a scan of this mode started or finished within the cooldown -> reuse it / ask to wait
+  // guard: if a live scan is already running (or was just requested), ask to wait instead of stacking scans; otherwise always start a fresh scan
   let run = null;
   try { run = await latestRun(env, mode); } catch (e) { console.log(e.message); }
   if (run) {
-    const started = Date.parse(run.run_started_at || run.created_at), ended = Date.parse(run.updated_at);
+    const started = Date.parse(run.run_started_at || run.created_at);
     if (run.status !== "completed" && now - started < 5 * 60e3) {
       return ephemeral(`⏳ A ${mode} scan started ${Math.round((now - started) / 1000)}s ago and its results will be posted in a few seconds. Try /livebets again in about 30s.`);
-    }
-    if (run.status === "completed" && run.conclusion === "success" && now - ended < cool) {
-      ctx.waitUntil((async () => {
-        try {
-          const data = await fetchResults(env);
-          await editOriginal(env, it.application_id, it.token, buildMessage(data, msgOpts(env, count, user, `♻️ Reusing the scan from ${Math.round((Date.now() - ended) / 1000)}s ago (cooldown ${cool / 1000}s).`)));
-        } catch (e) { await editOriginal(env, it.application_id, it.token, errMsg(`Couldn't load the latest results: ${e.message}`)); }
-      })());
-      return json({ type: 5 });
     }
   }
   if (now - lastDispatch[mode] < cool) {

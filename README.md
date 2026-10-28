@@ -74,8 +74,8 @@ Discord ──/livebets──▶ Cloudflare Worker (free) ──workflow_dispatc
    └──────────── top 5 bets edited into the reply ◀───────────────────────┘
 ```
 
-Options: `/livebets mode:upcoming` (pre-game instead of live) and `/livebets count:3` (1–10 picks, default 5).
-Cooldown: if a scan of the same mode finished in the last 60 s, that result is reused instead of starting a new one. If one is already running, the user is asked to wait (only they see that message).
+`/livebets` has no options: every use starts a fresh scan of live (in-progress) games and posts the top 5 bets.
+Guard: if a scan is already running (or one was requested in the last 60 s), the user is asked to wait instead of stacking scans (only they see that message).
 
 ### Values you need and where each one goes
 

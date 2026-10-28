@@ -50,11 +50,11 @@ console.log("✓ Ed25519 verification + PING");
 
 // 2 /livebets -> deferred + dispatch with sealed token
 calls = []; runs = [];
-let r = await call(cmd("1001", [{ name: "mode", value: "live" }, { name: "count", value: 3 }]));
+let r = await call(cmd("1001"));
 assert.deepEqual(r.json, { type: 5 });
 const d = calls.find(c => c.url.endsWith("/dispatches")); assert.ok(d, "dispatched");
 const inp = JSON.parse(d.body).inputs;
-assert.equal(inp.mode, "live"); assert.equal(inp.request_id, "discord-1001"); assert.equal(inp.discord_count, "3");
+assert.equal(inp.mode, "live"); assert.equal(inp.request_id, "discord-1001"); assert.equal(inp.discord_count, "5");
 assert.ok(inp.discord_token.startsWith("enc1.")); assert.equal(await openToken(inp.discord_token, env.RELAY_KEY), "itok_1001");
 console.log("✓ /livebets -> type 5, workflow_dispatch inputs", Object.keys(inp).join(","), "(token sealed)");
 
@@ -66,17 +66,12 @@ assert.equal(r.json.type, 4); assert.equal(r.json.data.flags, 64); console.log("
 runs = [{ display_title: "scan live discord-999", status: "in_progress", created_at: new Date(Date.now() - 20e3).toISOString(), run_started_at: new Date(Date.now() - 20e3).toISOString(), updated_at: new Date().toISOString() }];
 r = await call(cmd("1003")); assert.equal(r.json.type, 4); console.log("✓ running scan:", r.json.data.content);
 
-// 5 cooldown: completed < 60s ago -> deferred + reuse results (PATCH from the Worker, no new dispatch)
+// 5 no reuse: a scan completed < 60s ago still starts a fresh live scan (top 5); stray old options are ignored
 runs = [{ display_title: "scan live abc", status: "completed", conclusion: "success", created_at: new Date(Date.now() - 50e3).toISOString(), run_started_at: new Date(Date.now() - 50e3).toISOString(), updated_at: new Date(Date.now() - 15e3).toISOString() }];
-calls = []; r = await call(cmd("1004"));
-assert.deepEqual(r.json, { type: 5 }); assert.ok(!calls.some(c => c.url.endsWith("/dispatches")), "no new dispatch");
-const patch = calls.find(c => c.method === "PATCH"); assert.ok(patch.url.endsWith("/webhooks/app123/itok_1004/messages/@original"));
-assert.match(JSON.parse(patch.body).embeds[0].description, /Reusing the scan/); console.log("✓ reuse within cooldown -> PATCH @original");
-
-// 6 upcoming mode is independent of the live cooldown
-runs = []; calls = []; r = await call(cmd("1005", [{ name: "mode", value: "upcoming" }]));
-assert.deepEqual(r.json, { type: 5 }); assert.equal(JSON.parse(calls.find(c => c.url.endsWith("/dispatches")).body).inputs.mode, "upcoming");
-console.log("✓ upcoming mode dispatch");
+_resetGuard(); calls = []; r = await call(cmd("1004", [{ name: "mode", value: "upcoming" }, { name: "count", value: 9 }]));
+assert.deepEqual(r.json, { type: 5 });
+const i5 = JSON.parse(calls.find(c => c.url.endsWith("/dispatches")).body).inputs;
+assert.equal(i5.mode, "live"); assert.equal(i5.discord_count, "5"); console.log("✓ always a fresh live scan, top 5");
 
 // 7 GitHub dispatch failure -> error embed edited into the reply
 const f0 = globalThis.fetch; _resetGuard();

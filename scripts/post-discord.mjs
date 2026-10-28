@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Run by the scan workflow after a /livebets scan: edits the deferred Discord reply with the top bets.
-// env: DISCORD_APP_ID, DISCORD_TOKEN (plain or enc1.* sealed by the Worker), DISCORD_RELAY_KEY, DISCORD_COUNT, DISCORD_USER,
+// env: DISCORD_APP_ID, DISCORD_TOKEN (plain or enc1.* sealed by the Worker), DISCORD_RELAY_KEY, DISCORD_USER (always posts the top 5),
 //      REQUEST_ID, RESULTS_PATH, DASHBOARD_URL, RUN_URL, DISCORD_API (override for tests)
 import { readFileSync } from "node:fs";
 import { buildMessage, openToken, refreshForCard } from "../worker/src/embed.js";
@@ -16,7 +16,7 @@ if (E.LIVE_REFRESH !== "0") {
   try { note = await refreshForCard(data, { liveUrl: process.env.LIVE_URL ?? "https://luck-society-livebets.dreiss324.workers.dev/live" }); console.log("live refresh:", note || "nothing to refresh"); }
   catch (e) { console.log("live refresh failed, posting scan values:", e.message); }
 }
-const msg = buildMessage(data, { count: Math.max(1, Math.min(10, +E.DISCORD_COUNT || 5)), dashboardUrl: dash, note,
+const msg = buildMessage(data, { count: 5, dashboardUrl: dash, note,
   logoUrl: dash ? dash.replace(/\/?$/, "/") + "assets/logo.jpg" : "", requestedBy: E.DISCORD_USER || "" });
 const token = await openToken(E.DISCORD_TOKEN, E.DISCORD_RELAY_KEY);
 const r = await fetch(`${api}/webhooks/${E.DISCORD_APP_ID}/${token}/messages/@original`, { method: "PATCH",
